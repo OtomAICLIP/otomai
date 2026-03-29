@@ -1,0 +1,48 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <RootNamespace>Bubble.Core.Datacenter</RootNamespace>
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <CompilerVisibleProperty Include="Datacenter"/>
+        <CompilerVisibleProperty Include="Database"/>
+        <CompilerVisibleProperty Include="Services"/>
+        <CompilerVisibleProperty Include="MessageFactory"/>
+        <CompilerVisibleProperty Include="MessageHandler"/>
+    </ItemGroup>
+
+    <PropertyGroup>
+        <Datacenter>enable</Datacenter>
+        <Database>disable</Database>
+        <Services>disable</Services>
+        <MessageFactory>enable</MessageFactory>
+        <MessageHandler>disable</MessageHandler>
+    </PropertyGroup>
+
+
+
+    <ItemGroup>
+        <ProjectReference Include="..\Bubble.Core.Unity\Bubble.Core.Unity.csproj" />
+        <ProjectReference Include="..\Bubble.Core\Bubble.Core.csproj"/>
+        <ProjectReference Include="..\Bubble.SourceGenerators\Bubble.SourceGenerators.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer"/>
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Reference Include="AssetsTools.NET">
+        <HintPath>..\Bubble.Core.Unity\AssetsTools.NET.dll</HintPath>
+      </Reference>
+      <Reference Include="AssetsTools.NET.Cpp2IL">
+        <HintPath>..\Bubble.Core.Unity\AssetsTools.NET.Cpp2IL.dll</HintPath>
+      </Reference>
+    </ItemGroup>
+
+</Project>

@@ -1,0 +1,46 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <LangVersion>preview</LangVersion>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="BouncyCastle.NetCore" Version="2.2.1" />
+        <PackageReference Include="Serilog.AspNetCore" Version="8.0.3" />
+        <PackageReference Include="CommunityToolkit.HighPerformance" Version="8.3.2" />
+        <PackageReference Include="InfiniteEnumFlags" Version="0.4.3"/>
+        <PackageReference Include="Npgsql" Version="8.0.5" />
+        <PackageReference Include="protobuf-net" Version="3.2.45" />
+        <PackageReference Include="System.Management" Version="9.0.1" />
+    </ItemGroup>
+    
+    <ItemGroup>
+        <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <EmbeddedResource Update="Network\SocketsStrings.resx">
+            <Generator>ResXFileCodeGenerator</Generator>
+            <LastGenOutput>SocketsStrings.Designer.cs</LastGenOutput>
+        </EmbeddedResource>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Compile Update="Network\SocketsStrings.Designer.cs">
+            <DesignTime>True</DesignTime>
+            <AutoGen>True</AutoGen>
+            <DependentUpon>SocketsStrings.resx</DependentUpon>
+        </Compile>
+    </ItemGroup>
+
+    <ItemGroup>
+      <Reference Include="System.Management">
+        <HintPath>..\..\BubbleBot.Cli\bin\Debug\net9.0\runtimes\win\lib\net9.0\System.Management.dll</HintPath>
+      </Reference>
+    </ItemGroup>
+
+</Project>

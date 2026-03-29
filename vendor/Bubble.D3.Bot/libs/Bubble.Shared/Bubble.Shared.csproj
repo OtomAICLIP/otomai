@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <CompilerVisibleProperty Include="Database"/>
+        <CompilerVisibleProperty Include="Services"/>
+        <CompilerVisibleProperty Include="MessageFactory"/>
+        <CompilerVisibleProperty Include="MessageHandler"/>
+    </ItemGroup>
+
+    <PropertyGroup>
+        <Database>enable</Database>
+        <Services>disable</Services>
+        <MessageFactory>enable</MessageFactory>
+        <MessageHandler>disable</MessageHandler>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Bubble.Core.Datacenter\Bubble.Core.Datacenter.csproj" />
+        <ProjectReference Include="..\Bubble.Core\Bubble.Core.csproj"/>
+    </ItemGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Bubble.SourceGenerators\Bubble.SourceGenerators.csproj" ReferenceOutputAssembly="false" OutputItemType="Analyzer"/>
+    </ItemGroup>
+
+</Project>

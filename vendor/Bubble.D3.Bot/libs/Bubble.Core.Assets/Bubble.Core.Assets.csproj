@@ -1,0 +1,55 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
+      <PlatformTarget>x64</PlatformTarget>
+    </PropertyGroup>
+
+    <PropertyGroup Condition=" '$(Configuration)' == 'Release' ">
+      <PlatformTarget>x64</PlatformTarget>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\Bubble.Core.Unity\Bubble.Core.Unity.csproj" />
+      <ProjectReference Include="..\Bubble.Core\Bubble.Core.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Reference Include="AssetsTools.NET">
+        <HintPath>..\Bubble.Core.Unity\AssetsTools.NET.dll</HintPath>
+      </Reference>
+      <Reference Include="AssetsTools.NET.Cpp2IL">
+        <HintPath>..\Bubble.Core.Unity\AssetsTools.NET.Cpp2IL.dll</HintPath>
+      </Reference>
+      <Reference Include="AssetsTools.NET.Texture">
+        <HintPath>..\Bubble.Core.Unity\AssetsTools.NET.Texture.dll</HintPath>
+      </Reference>
+    </ItemGroup>
+
+    <ItemGroup>
+      <None Update="TexToolWrap.dll">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+      <None Update="PVRTexLib.dll">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+      <None Update="crnlib.dll">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+      <None Update="ispc_texcomp.dll">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+      <None Update="av_libglesv2.dll">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+      <None Update="onigwrap-x64.dll">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+</Project>

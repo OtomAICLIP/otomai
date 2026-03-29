@@ -1,0 +1,33 @@
+﻿namespace Bubble.DamageCalculation;
+
+public enum SpellShape
+{
+    X = 88,
+    L = 76,
+    T = 84,
+    P = 80,
+    D = 68,
+    C = 67,
+    O = 79,
+    Q = 81,
+    V = 86,
+    W = 87,
+    Plus = 43,
+    Sharp = 35,
+    Star = 42,
+    Slash = 47,
+    Minus = 45,
+    G = 71,
+    I = 73,
+    U = 85,
+    A = 65,
+    a = 97,
+    B = 66,
+    Z = 90,
+    Semicolon = 59,
+    Empty = 32,
+    l = 108,
+    R = 82,
+    F = 70,
+    Unknown = 0,
+}

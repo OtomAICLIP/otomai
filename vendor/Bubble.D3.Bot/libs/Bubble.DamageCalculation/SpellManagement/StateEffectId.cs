@@ -1,0 +1,37 @@
+namespace Bubble.DamageCalculation.SpellManagement;
+
+public enum StateEffectId
+{
+    CantBePushed,
+    CantBeTackled,
+    CantTackle,
+    CantBeMoved,
+    CantBeCarried,
+    CantBeHealed,
+    Pacifist,
+    Invulnerable,
+    CantUseSpells,
+    CantUseWeapons,
+    SoulSeeker,
+    MountTaming,
+    IaShy,
+    IaDisoriented,
+    Ghoul,
+    CanOnlyUseBows,
+    ServerSideOnly,
+    CantUsePortals,
+    CantSwitchPosition,
+    InvulnerableToMelee,
+    InvulnerableToRanged,
+    InvulnerableToFire,
+    InvulnerableToAir,
+    InvulnerableToWater,
+    InvulnerableToEarth,
+    InvulnerableToNeutral,
+    InvulnerableToPush,
+    InvulnerableToCritical,
+    InvulnerableToWeapons,
+    InvulnerableToLostAp,
+    InvulnerableToLostMp,
+    InvulnerableToSummoned
+}

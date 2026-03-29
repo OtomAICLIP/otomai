@@ -1,0 +1,15 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <LangVersion>preview</LangVersion>
+        <TargetFramework>net9.0</TargetFramework>
+    </PropertyGroup>
+
+    <ItemGroup>
+      <ProjectReference Include="..\Bubble.Core.Datacenter\Bubble.Core.Datacenter.csproj" />
+      <ProjectReference Include="..\Bubble.Core\Bubble.Core.csproj" />
+    </ItemGroup>
+
+</Project>

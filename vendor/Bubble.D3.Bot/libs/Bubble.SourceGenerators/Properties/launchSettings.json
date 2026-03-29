@@ -1,0 +1,13 @@
+﻿{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "Bubble.Servers.AuthServer": {
+      "commandName": "DebugRoslynComponent",
+      "targetProject": "../../src/Bubble.Servers.AuthServer/Bubble.Servers.AuthServer.csproj"
+    },
+    "Bubble.Servers.GameServer": {
+      "commandName": "DebugRoslynComponent",
+      "targetProject": "../../src/Bubble.Servers.GameServer/Bubble.Servers.GameServer.csproj"
+    }
+  }
+}
