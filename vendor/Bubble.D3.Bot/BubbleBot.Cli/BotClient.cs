@@ -218,6 +218,10 @@ public class BotClient : TcpClient
                                        Proxy,
                                        _settings);
 
+        // Enable TLS for game server connections — Dofus 3.5+ requires TLS
+        GameClient.UseTls = true;
+        GameClient.TlsTargetHost = _gameIp;
+
         BotManager.Instance.AddGameBotClient(GameClient);
 
         GameClient.ConnectAsync();

@@ -1,5 +1,7 @@
 ﻿using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using Bubble.Core.Network.Proxy;
 using Serilog;
@@ -174,6 +176,21 @@ public class TcpClient : IDisposable
     /// </summary>
     public int OptionSendBufferSize { get; set; } = 8192;
 
+    /// <summary>
+    /// Option: use TLS/SSL for this connection
+    /// </summary>
+    public bool UseTls { get; set; }
+
+    /// <summary>
+    /// The target host name for TLS SNI (Server Name Indication)
+    /// </summary>
+    public string? TlsTargetHost { get; set; }
+
+    // TLS stream fields
+    private NetworkStream? _networkStream;
+    private SslStream? _sslStream;
+    private CancellationTokenSource? _tlsReceiveCts;
+
     #region Connect/Disconnect client
 
     private SocketAsyncEventArgs _connectEventArg;
@@ -337,10 +354,21 @@ public class TcpClient : IDisposable
         _receiveEventArg.Completed -= OnAsyncCompleted;
         _sendEventArg.Completed -= OnAsyncCompleted;
 
+        // Cancel TLS receive loop
+        _tlsReceiveCts?.Cancel();
+        _tlsReceiveCts?.Dispose();
+        _tlsReceiveCts = null;
+
+        // Dispose TLS streams
+        try { _sslStream?.Dispose(); } catch { }
+        try { _networkStream?.Dispose(); } catch { }
+        _sslStream = null;
+        _networkStream = null;
+
         // Call the client disconnecting handler
         OnDisconnecting();
         ProxyConnected = false;
-        
+
         try
         {
             try
@@ -511,6 +539,10 @@ public class TcpClient : IDisposable
             if (buffer.IsEmpty)
                 return 0;
 
+            // Route through TLS stream when active
+            if (UseTls && _sslStream != null)
+                return TlsSend(buffer) ? buffer.Length : 0;
+
             // Sent data to the server
             long sent = Socket.Send(buffer, SocketFlags.None, out SocketError ec);
             if (sent > 0)
@@ -581,6 +613,10 @@ public class TcpClient : IDisposable
 
         if (buffer.IsEmpty)
             return true;
+
+        // Route through TLS stream when active
+        if (UseTls && _sslStream != null)
+            return TlsSend(buffer);
 
         lock (_sendLock)
         {
@@ -709,11 +745,18 @@ public class TcpClient : IDisposable
             Socket.Close();
             throw new Exception("Failed to connect to the proxy destination.");
         }
-        
+
         ProxyConnected = true;
         ProxyState = ProxyStateAuth.Server;
-        
-        OnConnected();
+
+        if (UseTls)
+        {
+            _ = NegotiateTlsAndStartAsync();
+        }
+        else
+        {
+            OnConnected();
+        }
     }
 
     /// <summary>
@@ -920,6 +963,13 @@ public class TcpClient : IDisposable
             IsConnected = true;
             
             OnInternalConnected();
+
+            // If TLS is requested and no proxy (proxy path handles TLS in ReceiveProxyServer)
+            if (UseTls && Proxy == null)
+            {
+                _ = NegotiateTlsAndStartAsync();
+                return;
+            }
 
             // Try to receive something from the server
             TryReceive();
@@ -1279,6 +1329,107 @@ public class TcpClient : IDisposable
         else
         {
             SendError(e.SocketError);
+            DisconnectAsync();
+            return false;
+        }
+    }
+
+    #endregion
+
+    #region TLS support
+
+    /// <summary>
+    /// Negotiate TLS over the connected socket, then start the TLS receive loop and fire OnConnected
+    /// </summary>
+    private async Task NegotiateTlsAndStartAsync()
+    {
+        try
+        {
+            _networkStream = new NetworkStream(Socket, ownsSocket: false);
+            _sslStream = new SslStream(_networkStream, leaveInnerStreamOpen: true,
+                (sender, certificate, chain, errors) => true); // Accept all certs (game server)
+
+            var targetHost = TlsTargetHost ?? Address;
+            Log.Information("TLS: negotiating with {Host}...", targetHost);
+
+            await _sslStream.AuthenticateAsClientAsync(new SslClientAuthenticationOptions
+            {
+                TargetHost = targetHost,
+                EnabledSslProtocols = System.Security.Authentication.SslProtocols.Tls12 |
+                                     System.Security.Authentication.SslProtocols.Tls13,
+            });
+
+            Log.Information("TLS: handshake complete — {Protocol}, {CipherAlgorithm}",
+                _sslStream.SslProtocol, _sslStream.CipherAlgorithm);
+
+            // Start the TLS receive loop
+            _tlsReceiveCts = new CancellationTokenSource();
+            _ = TlsReceiveLoopAsync(_tlsReceiveCts.Token);
+
+            // Notify subclass that connection is ready
+            OnConnected();
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "TLS: handshake failed");
+            SendError(SocketError.ConnectionAborted);
+            Disconnect();
+        }
+    }
+
+    /// <summary>
+    /// Background loop that reads from the SslStream and dispatches to OnReceived
+    /// </summary>
+    private async Task TlsReceiveLoopAsync(CancellationToken ct)
+    {
+        var buffer = new byte[OptionReceiveBufferSize];
+        try
+        {
+            while (!ct.IsCancellationRequested && IsConnected && _sslStream != null)
+            {
+                int bytesRead = await _sslStream.ReadAsync(buffer, 0, buffer.Length, ct);
+                if (bytesRead == 0)
+                {
+                    // Server closed the connection
+                    Log.Information("TLS: remote end closed connection");
+                    DisconnectAsync();
+                    return;
+                }
+
+                BytesReceived += bytesRead;
+                OnReceived(buffer, 0, bytesRead);
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            if (IsConnected)
+            {
+                Log.Error(ex, "TLS: receive error");
+                DisconnectAsync();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Send data via TLS stream (synchronous-ish, used by SendAsync path)
+    /// </summary>
+    private bool TlsSend(ReadOnlySpan<byte> buffer)
+    {
+        try
+        {
+            if (_sslStream == null || !IsConnected)
+                return false;
+
+            _sslStream.Write(buffer);
+            _sslStream.Flush();
+            BytesSent += buffer.Length;
+            OnSent(buffer.Length, 0);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "TLS: send error");
             DisconnectAsync();
             return false;
         }
