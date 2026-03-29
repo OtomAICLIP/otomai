@@ -12,8 +12,7 @@ from proxy_manager import Proxy
 
 logger = logging.getLogger(__name__)
 
-REGISTER_URL = "https://www.ankama.com/en/create-account"
-AUTH_REGISTER_URL = "https://auth.ankama.com/register/ankama/form"
+WEBAUTH_URL = "https://account.ankama.com/webauth/authorize?from=https://www.ankama.com/en"
 CHALLENGE_JS_URL = "https://3f38f7f4f368.edge.sdk.awswaf.com/3f38f7f4f368/ab89a1b580a1/challenge.js"
 
 
@@ -61,37 +60,58 @@ def create_account(
     with Camoufox(**camoufox_kwargs) as browser:
         page = browser.new_page()
 
-        # Navigate to registration page
-        logger.info("Navigating to Ankama registration page...")
-        page.goto(REGISTER_URL, wait_until="networkidle", timeout=60000)
+        # Navigate through OAuth flow: webauth -> login page -> "Create an Account" -> registration form
+        logger.info("Navigating to Ankama webauth (generates PKCE challenge)...")
+        page.goto(WEBAUTH_URL, wait_until="networkidle", timeout=60000)
         _rand_delay(page_wait)
 
         # Check if we got blocked by WAF (403)
         page_html = page.content()
         if "403 ERROR" in page_html or "Request could not be satisfied" in page_html:
-            # Try injecting WAF token via CAPTCHA solver
             if captcha_solver:
                 logger.info("Got WAF block, attempting CAPTCHA solve...")
                 waf_cookie = captcha_solver.solve_aws_waf(
-                    REGISTER_URL, page_html=page_html, challenge_js_url=CHALLENGE_JS_URL,
+                    page.url, page_html=page_html, challenge_js_url=CHALLENGE_JS_URL,
                 )
                 if waf_cookie:
-                    # Set the WAF cookie and retry
                     page.context.add_cookies([{
                         "name": "aws-waf-token",
                         "value": waf_cookie,
                         "domain": ".ankama.com",
                         "path": "/",
                     }])
-                    page.goto(REGISTER_URL, wait_until="networkidle", timeout=60000)
+                    page.goto(WEBAUTH_URL, wait_until="networkidle", timeout=60000)
                     _rand_delay(page_wait)
 
             if "403 ERROR" in page.content():
                 raise RuntimeError("WAF blocked access even after CAPTCHA solve. Need residential proxy.")
 
+        # Wait for SPA to render (page is a Vue/React app)
+        page.wait_for_selector("a, button, input", timeout=15000)
+        _rand_delay(page_wait)
+        logger.info("Reached login page at %s", page.url)
+
+        # Click "Ankama Connect" to get to the login form with "Create an Account" link
+        ankama_connect = page.query_selector("a[href*='login/ankama']")
+        if ankama_connect:
+            logger.info("Clicking Ankama Connect...")
+            ankama_connect.click()
+            # Wait for the login form to appear (has the email/password fields)
+            page.wait_for_selector("input[name='login']", timeout=15000)
+            _rand_delay(page_wait)
+            logger.info("Login form loaded at %s", page.url)
+
+        # Click "Create an Account" to reach registration form
+        create_link = page.query_selector("a[href*='register']")
+        if create_link:
+            logger.info("Clicking 'Create an Account'...")
+            create_link.click()
+        else:
+            raise RuntimeError(f"Could not find 'Create an Account' link on page: {page.url}")
+
         # Wait for registration form to load
         logger.info("Waiting for registration form...")
-        page.wait_for_selector("input[name='email'], #email, [data-testid='email']", timeout=30000)
+        page.wait_for_selector("input[name='email']", timeout=30000)
         _rand_delay(page_wait)
 
         # Fill the registration form with human-like typing
@@ -113,10 +133,10 @@ def create_account(
         _human_type(page, "input[name='lastname']", identity.last_name, typing_delay)
         _rand_delay(click_delay)
 
-        # Birthday - select dropdowns
-        _human_select(page, "select[name='birthday-day']", str(identity.birthday_day))
+        # Birthday - select dropdowns (values are zero-padded: "01", "02", etc.)
+        _human_select(page, "select[name='birthday-day']", f"{identity.birthday_day:02d}")
         _rand_delay(click_delay)
-        _human_select(page, "select[name='birthday-month']", str(identity.birthday_month))
+        _human_select(page, "select[name='birthday-month']", f"{identity.birthday_month:02d}")
         _rand_delay(click_delay)
         _human_select(page, "select[name='birthday-year']", str(identity.birthday_year))
         _rand_delay(click_delay)
@@ -124,38 +144,88 @@ def create_account(
         # Handle CAPTCHA if present
         _handle_captcha(page, captcha_solver)
 
-        # Submit the form
-        logger.info("Submitting registration form...")
-        submit_btn = page.query_selector("button[type='submit'], input[type='submit'], .submit-btn")
-        if submit_btn:
-            submit_btn.click()
-        else:
-            # Try triggering the secure-form handleSubmit
-            page.evaluate("document.querySelector('secure-form')?.handleSubmit()")
+        # Submit the form (with WAF retry logic)
+        max_waf_retries = 3
+        for attempt in range(max_waf_retries):
+            logger.info("Submitting registration form (attempt %d/%d)...", attempt + 1, max_waf_retries)
 
-        # Wait for response
-        try:
-            page.wait_for_url("**/register/ankama/success**", timeout=30000)
-            logger.info("Account created successfully: %s", identity.email)
-            return {
-                "success": True,
-                "email": identity.email,
-                "password": identity.password,
-                "first_name": identity.first_name,
-                "last_name": identity.last_name,
-            }
-        except Exception:
-            pass
+            # Capture the response status from the form submission
+            form_response_status = [None]
+            def capture_response(response):
+                if "form-submit" in response.url:
+                    form_response_status[0] = response.status
+            page.on("response", capture_response)
 
-        # Check for error messages
-        error_el = page.query_selector(".error-message, .alert-danger, [role='alert']")
-        error_text = error_el.inner_text() if error_el else "Unknown error"
+            submit_btn = page.query_selector("button[type='submit']")
+            if submit_btn:
+                submit_btn.click()
+            else:
+                page.evaluate("document.querySelector('form')?.submit()")
 
-        # Check if WAF blocked the POST
-        if "403" in page.content() or "waf" in page.content().lower():
-            raise RuntimeError(f"WAF blocked form submission: {error_text}")
+            # Wait for navigation
+            _rand_delay((3000, 5000))
+            page.remove_listener("response", capture_response)
 
-        raise RuntimeError(f"Registration failed: {error_text}")
+            # Check for success redirect
+            if "success" in page.url.lower():
+                logger.info("Account created successfully: %s", identity.email)
+                return {
+                    "success": True,
+                    "email": identity.email,
+                    "password": identity.password,
+                    "first_name": identity.first_name,
+                    "last_name": identity.last_name,
+                }
+
+            # Check if WAF blocked the POST (403) — wait for challenge.js to solve
+            if form_response_status[0] == 403 or "form-submit" in page.url:
+                logger.info("WAF challenge on POST (status=%s), waiting for challenge.js...", form_response_status[0])
+                time.sleep(10)  # Wait for challenge.js to set new cookie
+
+                if attempt < max_waf_retries - 1:
+                    # Go back to the form and refill
+                    logger.info("Going back to form for retry...")
+                    page.go_back()
+                    page.wait_for_selector("input[name='email']", timeout=15000)
+                    _rand_delay(page_wait)
+
+                    # Refill the form
+                    _human_type(page, "input[name='email']", identity.email, typing_delay)
+                    _rand_delay(click_delay)
+                    _human_type(page, "input[name='password']", identity.password, typing_delay)
+                    _rand_delay(click_delay)
+                    _human_type(page, "input[name='firstname']", identity.first_name, typing_delay)
+                    _rand_delay(click_delay)
+                    _human_type(page, "input[name='lastname']", identity.last_name, typing_delay)
+                    _rand_delay(click_delay)
+                    _human_select(page, "select[name='birthday-day']", f"{identity.birthday_day:02d}")
+                    _rand_delay(click_delay)
+                    _human_select(page, "select[name='birthday-month']", f"{identity.birthday_month:02d}")
+                    _rand_delay(click_delay)
+                    _human_select(page, "select[name='birthday-year']", str(identity.birthday_year))
+                    _rand_delay(click_delay)
+                    continue
+
+            # Check for validation errors
+            error_els = page.query_selector_all(".text-error, .has-error, .alert-danger, [role='alert']")
+            errors = [el.inner_text().strip() for el in error_els if el.inner_text().strip()]
+            if errors:
+                raise RuntimeError(f"Registration failed with errors: {'; '.join(errors)}")
+
+            # No success, no clear error — check page content
+            break
+
+        # Final error check
+        error_el = page.query_selector(".text-error, .error-message, .alert-danger, [role='alert']")
+        error_text = error_el.inner_text().strip() if error_el else ""
+
+        page_content = page.content()
+        if "form-submit" in page.url:
+            raise RuntimeError(f"WAF blocked form submission after {max_waf_retries} retries. "
+                             f"The AWS WAF challenge could not be solved automatically. "
+                             f"Errors: {error_text or 'none visible'}")
+
+        raise RuntimeError(f"Registration failed: {error_text or 'Unknown error'}")
 
 
 def _handle_captcha(page, captcha_solver: CaptchaSolver | None) -> None:
