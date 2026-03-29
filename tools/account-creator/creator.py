@@ -3,6 +3,7 @@
 import json
 import logging
 import random
+import re
 import time
 
 from camoufox.sync_api import Camoufox
@@ -15,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 WEBAUTH_URL = "https://account.ankama.com/webauth/authorize?from=https://www.ankama.com/en"
 CHALLENGE_JS_URL = "https://3f38f7f4f368.edge.sdk.awswaf.com/3f38f7f4f368/e1fcfc58118e/challenge.js"
+PROTONMAIL_URL = "https://mail.proton.me"
 
 
 def _rand_delay(range_ms: tuple[int, int]) -> None:
@@ -106,12 +108,94 @@ def _refresh_waf_token(page) -> str | None:
         return None
 
 
+def _retrieve_verification_code(browser, email_address: str, email_password: str,
+                                 max_wait_s: int = 120) -> str | None:
+    """Log into ProtonMail and retrieve the Ankama verification code.
+
+    Opens a new tab, logs in, finds the latest Ankama email, extracts the code.
+    """
+    logger.info("Opening ProtonMail to retrieve verification code for %s...", email_address)
+    # The base email (without +tag) is what we log into
+    base_email = re.sub(r'\+[^@]+', '', email_address)
+
+    mail_page = browser.new_page()
+    try:
+        mail_page.goto(PROTONMAIL_URL, wait_until="networkidle", timeout=60000)
+        time.sleep(2)
+
+        # Check if already logged in
+        if "mail" not in mail_page.url or "login" in mail_page.url:
+            # Need to log in
+            logger.info("Logging into ProtonMail as %s...", base_email)
+            mail_page.wait_for_selector("#username", timeout=15000)
+            mail_page.fill("#username", base_email)
+            mail_page.click("button[type='submit']")
+            time.sleep(1)
+            mail_page.wait_for_selector("#password", timeout=15000)
+            mail_page.fill("#password", email_password)
+            mail_page.click("button[type='submit']")
+
+            # Wait for inbox to load
+            mail_page.wait_for_selector("[data-testid='message-list']", timeout=60000)
+            logger.info("ProtonMail inbox loaded")
+
+        # Poll for the Ankama verification email
+        code = None
+        start = time.time()
+        while time.time() - start < max_wait_s:
+            # Look for an email from Ankama with a verification code
+            # Click on the most recent email from ankama/noreply
+            email_items = mail_page.query_selector_all("[data-testid='message-item']")
+            for item in email_items[:5]:  # check top 5 emails
+                text = item.inner_text().lower()
+                if "ankama" in text or "security code" in text or "verification" in text:
+                    item.click()
+                    time.sleep(2)
+                    # Extract the code from the email body
+                    body = mail_page.inner_text("[data-testid='message-content']") if mail_page.query_selector("[data-testid='message-content']") else ""
+                    if not body:
+                        body = mail_page.inner_text(".message-content") if mail_page.query_selector(".message-content") else ""
+                    if not body:
+                        body = mail_page.inner_text("body")
+                    logger.info("Email body (first 500): %s", body[:500])
+
+                    # Look for a 6-digit code pattern
+                    code_match = re.search(r'\b(\d{6})\b', body)
+                    if code_match:
+                        code = code_match.group(1)
+                        logger.info("Found verification code: %s", code)
+                        return code
+
+                    # Try 4-8 digit codes
+                    code_match = re.search(r'\b(\d{4,8})\b', body)
+                    if code_match:
+                        code = code_match.group(1)
+                        logger.info("Found possible verification code: %s", code)
+                        return code
+
+                    # Go back to inbox
+                    mail_page.go_back()
+                    time.sleep(1)
+
+            logger.info("Ankama email not found yet, waiting 10s... (%.0fs elapsed)",
+                        time.time() - start)
+            time.sleep(10)
+            mail_page.reload()
+            time.sleep(3)
+
+        logger.warning("Could not find verification code after %ds", max_wait_s)
+        return None
+    finally:
+        mail_page.close()
+
+
 def create_account(
     identity: Identity,
     captcha_solver: CaptchaSolver | None = None,
     proxy: Proxy | None = None,
     behavior: dict | None = None,
     headless: bool = True,
+    email_password: str | None = None,
 ) -> dict:
     """Create an Ankama account using Camoufox browser automation.
 
@@ -305,6 +389,51 @@ def create_account(
                     "last_name": identity.last_name,
                 }
 
+            # Check for email verification code page
+            if "/register/ankama/code" in page.url:
+                logger.info("Registration submitted — email verification required")
+                page_text = page.inner_text("body")[:500] if page.query_selector("body") else ""
+                logger.info("Verification page: %s", page_text.strip())
+
+                if email_password:
+                    code = _retrieve_verification_code(browser, identity.email, email_password)
+                    if code:
+                        logger.info("Entering verification code: %s", code)
+                        code_input = page.query_selector("input[name='code'], input[type='text'], input[placeholder*='code' i]")
+                        if code_input:
+                            _human_type(page, "input[name='code'], input[type='text'], input[placeholder*='code' i]", code, typing_delay)
+                            _rand_delay(click_delay)
+                            submit_btn = page.query_selector("button[type='submit']")
+                            if submit_btn:
+                                submit_btn.click()
+                            _rand_delay((3000, 5000))
+
+                            if "success" in page.url.lower() or "authorized" in page.url.lower() or "account" in page.url.lower():
+                                logger.info("Account created and verified: %s", identity.email)
+                                return {
+                                    "success": True,
+                                    "email": identity.email,
+                                    "password": identity.password,
+                                    "first_name": identity.first_name,
+                                    "last_name": identity.last_name,
+                                    "verified": True,
+                                }
+                            else:
+                                logger.warning("Verification code submitted but unexpected redirect: %s", page.url)
+                    else:
+                        logger.warning("Could not retrieve verification code from email")
+
+                # Return partial success — registration worked, needs manual verification
+                return {
+                    "success": True,
+                    "email": identity.email,
+                    "password": identity.password,
+                    "first_name": identity.first_name,
+                    "last_name": identity.last_name,
+                    "verified": False,
+                    "note": "Email verification code required. Check inbox for code.",
+                }
+
             # Check if WAF blocked the POST (403)
             if form_response_status[0] == 403 or "form-submit" in page.url:
                 logger.info("WAF challenge on POST (status=%s, body=%s)",
@@ -383,11 +512,37 @@ def create_account(
                 raise RuntimeError(f"Registration failed with errors: {'; '.join(errors)}")
 
             # No success, no clear error — check page content
+            logger.info("No success redirect detected. Final URL: %s", page.url)
+            logger.info("Form POST response status: %s", form_response_status[0])
+            logger.info("Form POST response body: %s", (form_response_body[0] or "")[:500])
+
+            # Check for success indicators beyond URL
+            page_text = page.inner_text("body")[:1000] if page.query_selector("body") else ""
+            logger.info("Page body text (first 1000 chars): %s", page_text)
+
+            # Check if we actually landed on a success/account page
+            if any(kw in page.url.lower() for kw in ["authorized", "account", "dashboard", "profile", "welcome"]):
+                logger.info("Possible success — landed on account-related URL: %s", page.url)
+                return {
+                    "success": True,
+                    "email": identity.email,
+                    "password": identity.password,
+                    "first_name": identity.first_name,
+                    "last_name": identity.last_name,
+                    "note": f"Redirected to {page.url} (may need email verification)",
+                }
+
             break
 
         # Final error check
         error_el = page.query_selector(".text-error, .error-message, .alert-danger, [role='alert']")
         error_text = error_el.inner_text().strip() if error_el else ""
+
+        # Log full page state for debugging
+        logger.info("Final page URL: %s", page.url)
+        logger.info("Final page title: %s", page.title())
+        page_text = page.inner_text("body")[:1000] if page.query_selector("body") else ""
+        logger.info("Final page body (first 1000): %s", page_text)
 
         if "form-submit" in page.url:
             raise RuntimeError(f"WAF blocked form submission after {max_waf_retries} retries. "
@@ -395,7 +550,7 @@ def create_account(
                              f"Last POST status: {form_response_status[0]}. "
                              f"Errors: {error_text or 'none visible'}")
 
-        raise RuntimeError(f"Registration failed: {error_text or 'Unknown error'}")
+        raise RuntimeError(f"Registration failed: {error_text or 'Unknown error'} | URL: {page.url} | POST status: {form_response_status[0]}")
 
 
 def _log_page_diagnostics(page) -> None:

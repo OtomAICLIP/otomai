@@ -123,6 +123,7 @@ def main() -> int:
     parser.add_argument("--captcha-backend", choices=CAPTCHA_BACKENDS, help="CAPTCHA solver backend")
     parser.add_argument("--captcha-key", help="API key for CAPTCHA solver")
     parser.add_argument("--proxy-mode", choices=PROXY_MODES, help="Proxy mode: direct, file, or free")
+    parser.add_argument("--email-password", help="ProtonMail password for email verification code retrieval")
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -160,6 +161,7 @@ def main() -> int:
                 proxy=proxy,
                 behavior=behavior_cfg,
                 headless=not args.headful,
+                email_password=args.email_password or config.get("account", {}).get("email_password"),
             )
             save_account(account, output_file)
             created += 1
