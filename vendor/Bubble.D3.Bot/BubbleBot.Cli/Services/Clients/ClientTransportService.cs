@@ -48,8 +48,26 @@ internal sealed class ClientTransportService
             var messageData = new byte[_context.ExpectedLength.Value];
             _context.Buffer.Read(messageData, 0, _context.ExpectedLength.Value);
 
-            using var stream = new MemoryStream(messageData);
-            var message = Serializer.Deserialize<GameMessage>(stream);
+            _logger.LogInfo("RCV raw: {Length} bytes: {Hex}", messageData.Length,
+                BitConverter.ToString(messageData, 0, Math.Min(messageData.Length, 64)));
+
+            GameMessage message;
+            try
+            {
+                using var stream = new MemoryStream(messageData);
+                message = Serializer.Deserialize<GameMessage>(stream);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogInfo("GameMessage deserialization failed: {Error}", ex.Message);
+                _context.IsWaitingForAnotherPacket = false;
+                if (_context.Buffer.Seek(_context.ExpectedLength.Value + _context.ExpectedLengthSize))
+                    continue;
+                ResetState();
+                continue;
+            }
+
+            _logger.LogInfo("RCV GameMessage ContentCase={Case}", message.ContentCase);
 
             var typeName = message.ContentCase switch
             {

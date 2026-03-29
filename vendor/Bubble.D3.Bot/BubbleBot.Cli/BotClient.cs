@@ -188,7 +188,7 @@ public class BotClient : TcpClient
 
         _token = selectServer.SuccessValue.Token;
         _gameIp = selectServer.SuccessValue.Host;
-        _gamePort = 443;
+        _gamePort = selectServer.SuccessValue.Ports.Count > 0 ? selectServer.SuccessValue.Ports[0] : 443;
 
 
         if (Proxy != null)
