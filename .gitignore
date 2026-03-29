@@ -1,1 +1,6 @@
 scripts/env.sh
+bin/
+obj/
+__pycache__/
+*.user
+.vs/
