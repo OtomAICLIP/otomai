@@ -672,7 +672,16 @@ namespace Com.ankama.dofus.server.connection.protocol
         public required global::System.Collections.Generic.List<ServerInformation> Servers { get; set; } = new global::System.Collections.Generic.List<ServerInformation>();
 
         [global::ProtoBuf.ProtoMember(2, Name = @"max_slot_by_type")]
-        public required int MaxSlotByType { get; set; }
+        public global::System.Collections.Generic.List<MaxSlotByTypeEntry> MaxSlotByType { get; set; } = new();
+
+        [global::ProtoBuf.ProtoContract()]
+        public partial class MaxSlotByTypeEntry
+        {
+            [global::ProtoBuf.ProtoMember(1, Name = @"key")]
+            public int Key { get; set; }
+            [global::ProtoBuf.ProtoMember(2, Name = @"value")]
+            public int Value { get; set; }
+        }
 
     }
 
