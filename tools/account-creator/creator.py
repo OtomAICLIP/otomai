@@ -22,6 +22,10 @@ def _rand_delay(range_ms: tuple[int, int]) -> None:
 
 def _human_type(page, selector: str, text: str, delay_ms: tuple[int, int] = (50, 150)) -> None:
     """Type text character by character with random delays."""
+    el = page.query_selector(selector)
+    if el:
+        el.scroll_into_view_if_needed()
+    _rand_delay((80, 200))
     page.click(selector)
     _rand_delay((100, 300))
     for char in text:
@@ -31,10 +35,74 @@ def _human_type(page, selector: str, text: str, delay_ms: tuple[int, int] = (50,
 
 def _human_select(page, selector: str, value: str) -> None:
     """Select a dropdown value with human-like timing."""
+    el = page.query_selector(selector)
+    if el:
+        el.scroll_into_view_if_needed()
+    _rand_delay((80, 200))
     page.click(selector)
     _rand_delay((200, 500))
     page.select_option(selector, value)
     _rand_delay((100, 300))
+
+
+def _add_mouse_noise(page, duration_ms: int = 2000) -> None:
+    """Generate random mouse movements to build behavioral telemetry for WAF."""
+    viewport = page.viewport_size or {"width": 1280, "height": 720}
+    steps = random.randint(3, 7)
+    for _ in range(steps):
+        x = random.randint(100, viewport["width"] - 100)
+        y = random.randint(100, viewport["height"] - 100)
+        page.mouse.move(x, y, steps=random.randint(5, 15))
+        _rand_delay((100, int(duration_ms / steps)))
+
+
+def _wait_for_waf_integration(page, timeout_s: int = 30) -> bool:
+    """Wait until AwsWafIntegration is loaded and has a token.
+
+    The <secure-form> component on auth.ankama.com calls
+    AwsWafIntegration.getToken() before every POST. If the integration
+    isn't ready, the POST will be rejected with 403.
+    """
+    logger.info("Waiting for AwsWafIntegration to initialise...")
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        ready = page.evaluate("""() => {
+            if (typeof AwsWafIntegration === 'undefined') return 'missing';
+            if (typeof AwsWafIntegration.hasToken === 'function' && AwsWafIntegration.hasToken()) return 'ready';
+            if (typeof AwsWafIntegration.getToken === 'function') return 'no_token';
+            return 'partial';
+        }""")
+        if ready == "ready":
+            logger.info("AwsWafIntegration ready with valid token")
+            return True
+        if ready == "no_token":
+            # Integration exists but no token yet — try requesting one
+            page.evaluate("AwsWafIntegration.getToken().catch(() => {})")
+        time.sleep(1)
+    logger.warning("AwsWafIntegration not ready after %ds (last state: %s)", timeout_s, ready)
+    return False
+
+
+def _refresh_waf_token(page) -> str | None:
+    """Request a fresh token from AwsWafIntegration.getToken() right before POST."""
+    try:
+        token = page.evaluate("""async () => {
+            if (typeof AwsWafIntegration === 'undefined') return null;
+            try {
+                const t = await AwsWafIntegration.getToken();
+                return t || null;
+            } catch (e) {
+                return null;
+            }
+        }""")
+        if token:
+            logger.info("Refreshed WAF token (%d chars)", len(token))
+        else:
+            logger.warning("AwsWafIntegration.getToken() returned empty")
+        return token
+    except Exception as e:
+        logger.warning("Failed to refresh WAF token: %s", e)
+        return None
 
 
 def create_account(
@@ -89,6 +157,10 @@ def create_account(
         # Wait for SPA to render (page is a Vue/React app)
         page.wait_for_selector("a, button, input", timeout=15000)
         _rand_delay(page_wait)
+
+        # Build behavioral telemetry early — WAF scores mouse/scroll events
+        _add_mouse_noise(page, duration_ms=3000)
+
         logger.info("Reached login page at %s", page.url)
 
         # Click "Ankama Connect" to get to the login form with "Create an Account" link
@@ -144,25 +216,71 @@ def create_account(
         # Handle CAPTCHA if present
         _handle_captcha(page, captcha_solver)
 
+        # Add more mouse noise after filling the form — builds WAF behavioral score
+        _add_mouse_noise(page, duration_ms=2000)
+
+        # Ensure AwsWafIntegration is loaded and has a token before attempting POST.
+        # The <secure-form> component calls AwsWafIntegration.getToken() + .fetch()
+        # internally. If the integration isn't ready, the POST is sent without a valid
+        # token and gets 403'd by the WAF.
+        waf_ready = _wait_for_waf_integration(page, timeout_s=30)
+        if not waf_ready:
+            logger.warning("AwsWafIntegration not ready — POST will likely 403. "
+                           "Attempting external WAF solve as fallback.")
+            if captcha_solver:
+                waf_cookie = captcha_solver.solve_aws_waf(
+                    page.url, page_html=page.content(), challenge_js_url=CHALLENGE_JS_URL,
+                )
+                if waf_cookie:
+                    page.context.add_cookies([{
+                        "name": "aws-waf-token",
+                        "value": waf_cookie,
+                        "domain": ".ankama.com",
+                        "path": "/",
+                    }])
+
         # Submit the form (with WAF retry logic)
         max_waf_retries = 3
         for attempt in range(max_waf_retries):
             logger.info("Submitting registration form (attempt %d/%d)...", attempt + 1, max_waf_retries)
 
+            # Refresh the WAF token right before POST — tokens expire quickly
+            _refresh_waf_token(page)
+
             # Capture the response status from the form submission
             form_response_status = [None]
+            form_response_body = [None]
             def capture_response(response):
                 if "form-submit" in response.url:
                     form_response_status[0] = response.status
+                    try:
+                        form_response_body[0] = response.text()
+                    except Exception:
+                        pass
             page.on("response", capture_response)
 
-            submit_btn = page.query_selector("button[type='submit']")
-            if submit_btn:
-                submit_btn.click()
-            else:
-                page.evaluate("document.querySelector('form')?.submit()")
+            # Prefer the <secure-form>'s own handleSubmit which uses
+            # AwsWafIntegration.fetch() — the right way to submit.
+            submitted_via_secure = page.evaluate("""() => {
+                const sf = document.querySelector('secure-form');
+                if (sf && typeof sf.handleSubmit === 'function') {
+                    sf.handleSubmit(new Event('submit'));
+                    return true;
+                }
+                return false;
+            }""")
 
-            # Wait for navigation
+            if not submitted_via_secure:
+                logger.info("No <secure-form> found, falling back to button click")
+                submit_btn = page.query_selector("button[type='submit']")
+                if submit_btn:
+                    submit_btn.scroll_into_view_if_needed()
+                    _rand_delay((200, 500))
+                    submit_btn.click()
+                else:
+                    page.evaluate("document.querySelector('form')?.submit()")
+
+            # Wait for navigation / response
             _rand_delay((3000, 5000))
             page.remove_listener("response", capture_response)
 
@@ -177,17 +295,45 @@ def create_account(
                     "last_name": identity.last_name,
                 }
 
-            # Check if WAF blocked the POST (403) — wait for challenge.js to solve
+            # Check if WAF blocked the POST (403)
             if form_response_status[0] == 403 or "form-submit" in page.url:
-                logger.info("WAF challenge on POST (status=%s), waiting for challenge.js...", form_response_status[0])
-                time.sleep(10)  # Wait for challenge.js to set new cookie
+                logger.info("WAF challenge on POST (status=%s, body=%s)",
+                            form_response_status[0],
+                            (form_response_body[0] or "")[:200])
 
                 if attempt < max_waf_retries - 1:
+                    # Wait for challenge.js to regenerate a fresh token
+                    logger.info("Waiting for challenge.js to regenerate token...")
+                    time.sleep(5)
+
+                    # Actively request a fresh token instead of hoping one appears
+                    _refresh_waf_token(page)
+
+                    # Also try external solver as backup
+                    if captcha_solver:
+                        waf_cookie = captcha_solver.solve_aws_waf(
+                            page.url, page_html=page.content(),
+                            challenge_js_url=CHALLENGE_JS_URL,
+                        )
+                        if waf_cookie:
+                            page.context.add_cookies([{
+                                "name": "aws-waf-token",
+                                "value": waf_cookie,
+                                "domain": ".ankama.com",
+                                "path": "/",
+                            }])
+
+                    # Add more behavioral noise before retry
+                    _add_mouse_noise(page, duration_ms=2000)
+
                     # Go back to the form and refill
                     logger.info("Going back to form for retry...")
                     page.go_back()
                     page.wait_for_selector("input[name='email']", timeout=15000)
                     _rand_delay(page_wait)
+
+                    # Wait for AwsWafIntegration to re-init on the fresh page
+                    _wait_for_waf_integration(page, timeout_s=15)
 
                     # Refill the form
                     _human_type(page, "input[name='email']", identity.email, typing_delay)
@@ -204,6 +350,7 @@ def create_account(
                     _rand_delay(click_delay)
                     _human_select(page, "select[name='birthday-year']", str(identity.birthday_year))
                     _rand_delay(click_delay)
+                    _add_mouse_noise(page, duration_ms=1500)
                     continue
 
             # Check for validation errors
@@ -219,10 +366,10 @@ def create_account(
         error_el = page.query_selector(".text-error, .error-message, .alert-danger, [role='alert']")
         error_text = error_el.inner_text().strip() if error_el else ""
 
-        page_content = page.content()
         if "form-submit" in page.url:
             raise RuntimeError(f"WAF blocked form submission after {max_waf_retries} retries. "
                              f"The AWS WAF challenge could not be solved automatically. "
+                             f"Last POST status: {form_response_status[0]}. "
                              f"Errors: {error_text or 'none visible'}")
 
         raise RuntimeError(f"Registration failed: {error_text or 'Unknown error'}")
