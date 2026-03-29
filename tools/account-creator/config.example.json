@@ -1,0 +1,29 @@
+{
+  "capsolver_api_key": "",
+  "proxy": {
+    "enabled": false,
+    "type": "residential",
+    "list_file": "proxies.txt",
+    "format": "host:port:user:pass",
+    "rotate_after": 4
+  },
+  "account": {
+    "email_domain": "protonmail.com",
+    "email_prefix": "otomai.gen",
+    "password_length": 16
+  },
+  "behavior": {
+    "typing_delay_ms": [50, 150],
+    "click_delay_ms": [200, 800],
+    "page_wait_ms": [1000, 3000],
+    "mouse_movements": true
+  },
+  "rate_limit": {
+    "max_accounts_per_ip": 4,
+    "delay_between_accounts_s": [30, 90]
+  },
+  "output": {
+    "file": "accounts.json",
+    "format": "json"
+  }
+}
