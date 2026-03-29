@@ -143,7 +143,7 @@ def main() -> int:
         logger.info("--- Account %d/%d ---", i + 1, args.count)
 
         identity = generate_identity(
-            email_prefix=account_cfg.get("email_prefix", "otomai.gen"),
+            email_prefix=account_cfg.get("email_prefix", "otomai.project"),
             email_domain=account_cfg.get("email_domain", "protonmail.com"),
             password_length=account_cfg.get("password_length", 16),
         )

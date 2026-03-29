@@ -9,7 +9,7 @@
   },
   "account": {
     "email_domain": "protonmail.com",
-    "email_prefix": "otomai.gen",
+    "email_prefix": "otomai.project",
     "password_length": 16
   },
   "behavior": {

@@ -34,7 +34,7 @@ def generate_password(length: int = 16) -> str:
             return pw
 
 
-def generate_identity(email_prefix: str = "otomai.gen", email_domain: str = "protonmail.com", password_length: int = 16) -> Identity:
+def generate_identity(email_prefix: str = "otomai.project", email_domain: str = "protonmail.com", password_length: int = 16) -> Identity:
     tag = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
     email = f"{email_prefix}+{tag}@{email_domain}"
 
