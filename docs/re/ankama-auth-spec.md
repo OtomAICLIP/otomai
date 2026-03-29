@@ -82,10 +82,12 @@ The login page initiates an OAuth2 Authorization Code flow with PKCE:
 ### Custom Elements
 
 - Form is wrapped in a `<secure-form>` custom web component
-- `<secure-form>` exposes a `handleSubmit` method that:
-  1. Gathers form data
-  2. Acquires a fresh `aws-waf-token` via `AwsWafIntegration.getToken()`
-  3. Submits via `AwsWafIntegration.fetch()` (not standard `fetch`)
+- `<secure-form>` is a **double-submit prevention wrapper only** (source: `main.ts-Buc2RfQ7.js`):
+  1. On first submit: disables button, shows loader
+  2. On subsequent submits: calls `preventDefault()`
+  3. Does NOT interact with WAF tokens or `AwsWafIntegration`
+- Form submission is standard HTML POST — no JS fetch override
+- The `aws-waf-token` cookie is set silently by `challenge.js` and sent automatically by the browser with the POST
 
 ### Protection Layers (Registration)
 
@@ -201,7 +203,8 @@ Token lifespan: ~1 minute. Used to authenticate with the game server.
 
 ### Challenge Script
 
-Loaded from: `https://3f38f7f4f368.edge.sdk.awswaf.com/3f38f7f4f368/ab89a1b580a1/challenge.js`
+Loaded from: `https://3f38f7f4f368.edge.sdk.awswaf.com/3f38f7f4f368/e1fcfc58118e/challenge.js`
+> Hash rotates periodically. Previous: `ab89a1b580a1` (pre-2026-03-29).
 
 Automatically loaded in `<head>` with `defer` attribute.
 
@@ -247,11 +250,16 @@ Token assembly:
 
 ### AwsWafIntegration API
 
-| Method | Purpose |
-|--------|---------|
-| `AwsWafIntegration.fetch(url, options)` | Wrapper around `fetch()` that auto-attaches WAF token |
-| `AwsWafIntegration.getToken()` | Returns current token, stores in `aws-waf-token` cookie |
-| `AwsWafIntegration.hasToken()` | Boolean: is there an unexpired token? |
+> **NOTE (2026-03-29):** Live testing confirmed that `AwsWafIntegration` is NOT exposed as a global
+> on `auth.ankama.com`. The `challenge.js` script operates silently — it collects fingerprints,
+> generates the token, and sets the `aws-waf-token` cookie directly without any JS API. The methods
+> below are from the AWS WAF SDK documentation but are NOT available on this site.
+
+| Method | Purpose | Available? |
+|--------|---------|------------|
+| `AwsWafIntegration.fetch(url, options)` | Wrapper around `fetch()` that auto-attaches WAF token | **NO** |
+| `AwsWafIntegration.getToken()` | Returns current token, stores in `aws-waf-token` cookie | **NO** |
+| `AwsWafIntegration.hasToken()` | Boolean: is there an unexpired token? | **NO** |
 
 ### Token Cookie
 
@@ -260,14 +268,21 @@ Token assembly:
 - **Storage:** Also uses `localStorage` buffer (max 10,240 bytes, time-expiring)
 - **Encryption:** AWS-proprietary, not publicly documented
 
-### Why Headless Chrome Fails
+### Why POST Fails from Datacenter IPs (Confirmed 2026-03-29)
 
-The WAF fingerprinting detects:
+Live testing with Camoufox confirmed:
+- **GET requests pass** from datacenter IPs — pages load, challenge.js runs, cookie is set
+- **POST requests return 403** — `x-cache: Error from cloudfront` indicates edge-level rejection
+- The `aws-waf-token` cookie IS present and sent with the POST request
+- The 403 response body is the registration form re-rendered (server received the POST)
+- **Root cause: CloudFront WAF applies stricter IP reputation scoring on POST than GET**
+- Residential IPs are required for POST submissions
+
+The WAF fingerprinting also detects:
 - CDP (Chrome DevTools Protocol) artifacts
 - Canvas/WebGL rendering inconsistencies from headless mode
 - Missing or inconsistent navigator properties
 - Timing anomalies from emulated environments
-- GET requests pass but POST requests are rejected (fingerprint is re-verified on POST)
 
 ### CAPTCHA Details
 
