@@ -1,29 +1,10 @@
+// This file is kept for backwards compatibility.
+// The authoritative GameRuntimeState is now in Client/Context/BotGameClientContext.cs
+// per the Bubble.D3.Bot architecture alignment.
+
+using OtomAI.Bot.Client.Context;
+
 namespace OtomAI.Bot.State;
 
-/// <summary>
-/// Centralized game state container.
-/// Inspired by Bubble.D3.Bot's GameRuntimeState (85+ properties).
-/// Add fields as protocol messages are decoded.
-/// </summary>
-public sealed class GameRuntimeState
-{
-    // Character
-    public long CharacterId { get; set; }
-    public string CharacterName { get; set; } = "";
-    public int Level { get; set; }
-    public long CurrentMapId { get; set; }
-    public int CurrentCellId { get; set; }
-
-    // Resources
-    public int Kamas { get; set; }
-    public int ActionPoints { get; set; }
-    public int MovementPoints { get; set; }
-
-    // Combat
-    public bool InFight { get; set; }
-    public int FightTurn { get; set; }
-
-    // Server
-    public int ServerId { get; set; }
-    public string ServerName { get; set; } = "";
-}
+// Re-export for any code still referencing this namespace
+// TODO: Migrate all references to OtomAI.Bot.Client.Context.GameRuntimeState

@@ -9,19 +9,28 @@ using Serilog;
 namespace OtomAI.Bot.Client;
 
 /// <summary>
-/// Single bot instance managing auth + game connection.
-/// Follows Bubble.D3.Bot's BotClient pattern: auth server -> get ticket -> game server.
+/// Login (connection) server TCP client.
+/// Phase 1 of the two-phase connection model from Bubble.D3.Bot:
+/// 1. BotClient connects to login server, authenticates, selects server, gets token
+/// 2. BotGameClient connects to game server with the token
+///
+/// The old monolithic BotClient has been split per Bubble.D3.Bot's architecture.
 /// </summary>
 public sealed class BotClient : IAsyncDisposable
 {
     private readonly GameConnection _connection = new();
     private readonly MessageDispatcher _dispatcher = new();
     private readonly AnkamaAuth _auth = new();
-    private Timer? _keepAlive;
     private int _nextUid;
 
     public string AccountEmail { get; }
     public BotState State { get; private set; } = BotState.Disconnected;
+
+    // Populated after successful login + server selection
+    public string? SessionToken { get; private set; }
+    public string? GameServerHost { get; private set; }
+    public int GameServerPort { get; private set; }
+    public int SelectedServerId { get; private set; }
 
     public BotClient(string accountEmail)
     {
@@ -30,7 +39,7 @@ public sealed class BotClient : IAsyncDisposable
         _connection.OnDisconnected += ex =>
         {
             State = BotState.Disconnected;
-            Log.Error(ex, "Bot {Email} disconnected", AccountEmail);
+            Log.Error(ex, "Login client {Email} disconnected", AccountEmail);
         };
     }
 
@@ -39,7 +48,11 @@ public sealed class BotClient : IAsyncDisposable
         _dispatcher.Register(handler);
     }
 
-    public async Task ConnectAsync(string password, string gameHost, int gamePort, CancellationToken ct = default)
+    /// <summary>
+    /// Authenticate with Ankama, connect to login server, and get a game session token.
+    /// After this completes, read SessionToken/GameServerHost/GameServerPort to create a BotGameClient.
+    /// </summary>
+    public async Task ConnectAsync(string password, string loginHost, int loginPort, CancellationToken ct = default)
     {
         State = BotState.Authenticating;
         Log.Information("Authenticating {Email}...", AccountEmail);
@@ -47,11 +60,10 @@ public sealed class BotClient : IAsyncDisposable
         var tokens = await _auth.LoginAsync(AccountEmail, password, ct);
 
         State = BotState.Connecting;
-        Log.Information("Connecting to game server {Host}:{Port}...", gameHost, gamePort);
+        Log.Information("Connecting to login server {Host}:{Port}...", loginHost, loginPort);
 
-        await _connection.ConnectAsync(gameHost, gamePort, ct);
+        await _connection.ConnectAsync(loginHost, loginPort, ct);
 
-        // Send identification with OAuth token
         await SendRequestAsync(new IdentificationRequest
         {
             TicketKey = tokens.AccessToken,
@@ -59,19 +71,18 @@ public sealed class BotClient : IAsyncDisposable
         }, ct);
 
         State = BotState.Connected;
+    }
 
-        // Start keep-alive ping every 30 seconds
-        _keepAlive = new Timer(async _ =>
-        {
-            try
-            {
-                await SendRequestAsync(new PingRequest { Quiet = true }, ct);
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Keep-alive failed for {Email}", AccountEmail);
-            }
-        }, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+    /// <summary>
+    /// Called when server selection response arrives with game server address.
+    /// </summary>
+    public void SetGameServerInfo(string host, int port, string sessionToken, int serverId)
+    {
+        GameServerHost = host;
+        GameServerPort = port;
+        SessionToken = sessionToken;
+        SelectedServerId = serverId;
+        Log.Information("Game server selected: {Host}:{Port} (server {Id})", host, port, serverId);
     }
 
     public async Task SendRequestAsync<T>(T message, CancellationToken ct = default) where T : class, IProtoMessage
@@ -106,13 +117,12 @@ public sealed class BotClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "Failed to deserialize message ({Bytes} bytes)", data.Length);
+            Log.Error(ex, "Failed to deserialize login message ({Bytes} bytes)", data.Length);
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        _keepAlive?.Dispose();
         await _connection.DisposeAsync();
     }
 }
@@ -123,5 +133,6 @@ public enum BotState
     Authenticating,
     Connecting,
     Connected,
+    SelectingServer,
     InGame,
 }
