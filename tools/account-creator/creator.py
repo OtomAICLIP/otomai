@@ -120,68 +120,135 @@ def _retrieve_verification_code(browser, email_address: str, email_password: str
 
     mail_page = browser.new_page()
     try:
-        mail_page.goto(PROTONMAIL_URL, wait_until="networkidle", timeout=60000)
+        mail_page.goto(PROTONMAIL_URL, wait_until="domcontentloaded", timeout=60000)
         time.sleep(2)
 
-        # Check if already logged in
-        if "mail" not in mail_page.url or "login" in mail_page.url:
-            # Need to log in
+        # Always try to log in — check for the sign-in form
+        username_field = mail_page.query_selector("#username")
+        if username_field:
             logger.info("Logging into ProtonMail as %s...", base_email)
-            mail_page.wait_for_selector("#username", timeout=15000)
             mail_page.fill("#username", base_email)
             mail_page.click("button[type='submit']")
-            time.sleep(1)
+            time.sleep(2)
             mail_page.wait_for_selector("#password", timeout=15000)
             mail_page.fill("#password", email_password)
             mail_page.click("button[type='submit']")
+            time.sleep(3)
 
-            # Wait for inbox to load
-            mail_page.wait_for_selector("[data-testid='message-list']", timeout=60000)
-            logger.info("ProtonMail inbox loaded")
+            # Wait for inbox to load — try multiple selectors
+            try:
+                mail_page.wait_for_selector("[data-testid='message-item'], [data-shortcut-target='message-container'], .item-container, [data-element-id]", timeout=60000)
+                logger.info("ProtonMail inbox loaded at %s", mail_page.url)
+            except Exception as e:
+                logger.warning("Inbox load wait failed: %s — continuing anyway", e)
+                time.sleep(5)
+        else:
+            logger.info("No login form found — may already be logged in at %s", mail_page.url)
 
         # Poll for the Ankama verification email
         code = None
         start = time.time()
         while time.time() - start < max_wait_s:
-            # Look for an email from Ankama with a verification code
-            # Click on the most recent email from ankama/noreply
+            # Debug: log current URL and page state
+            logger.info("ProtonMail URL: %s", mail_page.url)
+
+            # Try multiple selectors for email items
             email_items = mail_page.query_selector_all("[data-testid='message-item']")
+            if not email_items:
+                email_items = mail_page.query_selector_all("[data-shortcut-target='message-container']")
+            if not email_items:
+                email_items = mail_page.query_selector_all(".item-container")
+            if not email_items:
+                # Fallback: try to find any list items in the inbox
+                email_items = mail_page.query_selector_all("[data-element-id]")
+
+            logger.info("Found %d email items in inbox", len(email_items))
+            if not email_items:
+                # Log page text for debugging
+                page_text = mail_page.inner_text("body")[:300] if mail_page.query_selector("body") else "empty"
+                logger.info("Page text: %s", page_text.strip())
+
             for item in email_items[:5]:  # check top 5 emails
                 text = item.inner_text().lower()
-                if "ankama" in text or "security code" in text or "verification" in text:
+                logger.info("Email item text: %s", text[:100])
+                if "ankama" in text or "security code" in text or "verification" in text or "code" in text:
                     item.click()
+                    time.sleep(3)
+
+                    # Scroll to bottom of conversation
+                    mail_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                     time.sleep(2)
-                    # Extract the code from the email body
-                    body = mail_page.inner_text("[data-testid='message-content']") if mail_page.query_selector("[data-testid='message-content']") else ""
-                    if not body:
-                        body = mail_page.inner_text(".message-content") if mail_page.query_selector(".message-content") else ""
-                    if not body:
-                        body = mail_page.inner_text("body")
-                    logger.info("Email body (first 500): %s", body[:500])
 
-                    # Look for a 6-digit code pattern
-                    code_match = re.search(r'\b(\d{6})\b', body)
-                    if code_match:
-                        code = code_match.group(1)
-                        logger.info("Found verification code: %s", code)
-                        return code
+                    # ProtonMail collapses most messages in long threads.
+                    # Find all collapsed message headers and expand the LAST one
+                    # Collapsed messages are clickable elements without an expanded body
+                    collapsed = mail_page.query_selector_all(
+                        "[data-testid='message-header-collapsed']"
+                    )
+                    if not collapsed:
+                        # Try alternative selectors for collapsed messages
+                        collapsed = mail_page.query_selector_all(
+                            ".message-header-collapsed, "
+                            ".message-container:not(.is-opened) .message-header"
+                        )
+                    logger.info("Found %d collapsed message headers", len(collapsed))
 
-                    # Try 4-8 digit codes
-                    code_match = re.search(r'\b(\d{4,8})\b', body)
-                    if code_match:
-                        code = code_match.group(1)
-                        logger.info("Found possible verification code: %s", code)
-                        return code
+                    if collapsed:
+                        # Click the LAST collapsed header (newest message)
+                        last = collapsed[-1]
+                        try:
+                            last.scroll_into_view_if_needed()
+                            time.sleep(1)
+                            last.click()
+                            time.sleep(3)
+                            logger.info("Expanded last collapsed message")
+                        except Exception as e:
+                            logger.warning("Failed to expand last message: %s", e)
 
-                    # Go back to inbox
+                    # Now scroll to bottom again and get iframes
+                    mail_page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    time.sleep(2)
+
+                    # Get all iframes — filter out system frames
+                    iframes = mail_page.query_selector_all("iframe")
+                    real_iframes = []
+                    for iframe in iframes:
+                        frame = iframe.content_frame()
+                        if not frame:
+                            continue
+                        try:
+                            body = frame.inner_text("body")
+                        except Exception:
+                            continue
+                        if body and len(body) > 20 and "requires Javascript" not in body:
+                            real_iframes.append((iframe, body))
+
+                    logger.info("Found %d real message iframes after expand", len(real_iframes))
+
+                    # Check from last (newest) to first
+                    for idx in range(len(real_iframes) - 1, -1, -1):
+                        _, body = real_iframes[idx]
+                        code_match = re.search(r'\b(\d{6})\b', body)
+                        if code_match:
+                            candidate = code_match.group(1)
+                            logger.info("Iframe %d code: %s, body: %s",
+                                        idx, candidate, body[:100])
+                            # Newest iframe with a code — use it
+                            return candidate
+
+                    # Go back to inbox for retry
                     mail_page.go_back()
-                    time.sleep(1)
+                    time.sleep(2)
+                    break  # Retry in next poll iteration
 
             logger.info("Ankama email not found yet, waiting 10s... (%.0fs elapsed)",
                         time.time() - start)
             time.sleep(10)
-            mail_page.reload()
-            time.sleep(3)
+            try:
+                mail_page.reload(wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                pass  # SPA may not fully settle — that's fine
+            time.sleep(5)
 
         logger.warning("Could not find verification code after %ds", max_wait_s)
         return None
