@@ -1,5 +1,6 @@
 """Ankama account creation via Camoufox anti-detect browser."""
 
+import json
 import logging
 import random
 import time
@@ -13,7 +14,7 @@ from proxy_manager import Proxy
 logger = logging.getLogger(__name__)
 
 WEBAUTH_URL = "https://account.ankama.com/webauth/authorize?from=https://www.ankama.com/en"
-CHALLENGE_JS_URL = "https://3f38f7f4f368.edge.sdk.awswaf.com/3f38f7f4f368/ab89a1b580a1/challenge.js"
+CHALLENGE_JS_URL = "https://3f38f7f4f368.edge.sdk.awswaf.com/3f38f7f4f368/e1fcfc58118e/challenge.js"
 
 
 def _rand_delay(range_ms: tuple[int, int]) -> None:
@@ -219,14 +220,17 @@ def create_account(
         # Add more mouse noise after filling the form — builds WAF behavioral score
         _add_mouse_noise(page, duration_ms=2000)
 
-        # Ensure AwsWafIntegration is loaded and has a token before attempting POST.
-        # The <secure-form> component calls AwsWafIntegration.getToken() + .fetch()
-        # internally. If the integration isn't ready, the POST is sent without a valid
-        # token and gets 403'd by the WAF.
-        waf_ready = _wait_for_waf_integration(page, timeout_s=30)
-        if not waf_ready:
-            logger.warning("AwsWafIntegration not ready — POST will likely 403. "
-                           "Attempting external WAF solve as fallback.")
+        # --- Diagnostics: capture page state before POST ---
+        _log_page_diagnostics(page)
+
+        # Check if the WAF token cookie is present. challenge.js sets it automatically
+        # during navigation. If it's missing, try the external solver as fallback.
+        waf_cookies = [c for c in page.context.cookies() if c["name"] == "aws-waf-token"]
+        if waf_cookies:
+            logger.info("WAF token cookie present (domain=%s, %d chars)",
+                        waf_cookies[0]["domain"], len(waf_cookies[0]["value"]))
+        else:
+            logger.warning("No aws-waf-token cookie found — trying external solver")
             if captcha_solver:
                 waf_cookie = captcha_solver.solve_aws_waf(
                     page.url, page_html=page.content(), challenge_js_url=CHALLENGE_JS_URL,
@@ -235,50 +239,56 @@ def create_account(
                     page.context.add_cookies([{
                         "name": "aws-waf-token",
                         "value": waf_cookie,
-                        "domain": ".ankama.com",
+                        "domain": ".auth.ankama.com",
                         "path": "/",
                     }])
+
+        # Check for AwsWafIntegration JS API (may not be present — challenge.js
+        # on auth.ankama.com operates silently via cookies without exposing globals)
+        has_waf_api = page.evaluate("typeof AwsWafIntegration !== 'undefined'")
+        if has_waf_api:
+            _wait_for_waf_integration(page, timeout_s=15)
+        else:
+            logger.info("No AwsWafIntegration JS API — WAF operates via cookie only")
 
         # Submit the form (with WAF retry logic)
         max_waf_retries = 3
         for attempt in range(max_waf_retries):
             logger.info("Submitting registration form (attempt %d/%d)...", attempt + 1, max_waf_retries)
 
-            # Refresh the WAF token right before POST — tokens expire quickly
-            _refresh_waf_token(page)
+            # If AwsWafIntegration JS API exists, refresh token before POST
+            if has_waf_api:
+                _refresh_waf_token(page)
 
             # Capture the response status from the form submission
             form_response_status = [None]
             form_response_body = [None]
+            form_response_headers = [None]
+            form_request_headers = [None]
             def capture_response(response):
                 if "form-submit" in response.url:
                     form_response_status[0] = response.status
+                    form_response_headers[0] = response.headers
+                    try:
+                        form_request_headers[0] = response.request.headers
+                    except Exception:
+                        pass
                     try:
                         form_response_body[0] = response.text()
                     except Exception:
                         pass
             page.on("response", capture_response)
 
-            # Prefer the <secure-form>'s own handleSubmit which uses
-            # AwsWafIntegration.fetch() — the right way to submit.
-            submitted_via_secure = page.evaluate("""() => {
-                const sf = document.querySelector('secure-form');
-                if (sf && typeof sf.handleSubmit === 'function') {
-                    sf.handleSubmit(new Event('submit'));
-                    return true;
-                }
-                return false;
-            }""")
-
-            if not submitted_via_secure:
-                logger.info("No <secure-form> found, falling back to button click")
-                submit_btn = page.query_selector("button[type='submit']")
-                if submit_btn:
-                    submit_btn.scroll_into_view_if_needed()
-                    _rand_delay((200, 500))
-                    submit_btn.click()
-                else:
-                    page.evaluate("document.querySelector('form')?.submit()")
+            # Submit via button click (the <secure-form> on auth.ankama.com
+            # does not expose a handleSubmit JS API — it intercepts form
+            # submission at the DOM level)
+            submit_btn = page.query_selector("button[type='submit']")
+            if submit_btn:
+                submit_btn.scroll_into_view_if_needed()
+                _rand_delay((200, 500))
+                submit_btn.click()
+            else:
+                page.evaluate("document.querySelector('form')?.submit()")
 
             # Wait for navigation / response
             _rand_delay((3000, 5000))
@@ -302,12 +312,24 @@ def create_account(
                             (form_response_body[0] or "")[:200])
 
                 if attempt < max_waf_retries - 1:
-                    # Wait for challenge.js to regenerate a fresh token
+                    # Log full 403 details for analysis
+                    logger.info("403 response headers: %s", form_response_headers[0])
+                    logger.info("403 request headers: %s", form_request_headers[0])
+                    logger.info("403 response body:\n%s", form_response_body[0] or "")
+
+                    # Wait for challenge.js to regenerate a fresh cookie
                     logger.info("Waiting for challenge.js to regenerate token...")
                     time.sleep(5)
 
-                    # Actively request a fresh token instead of hoping one appears
-                    _refresh_waf_token(page)
+                    # Check if challenge.js updated the cookie
+                    new_cookies = [c for c in page.context.cookies() if c["name"] == "aws-waf-token"]
+                    if new_cookies:
+                        logger.info("Cookie after wait: domain=%s, %d chars",
+                                    new_cookies[0]["domain"], len(new_cookies[0]["value"]))
+
+                    # Actively request a fresh token if JS API is available
+                    if has_waf_api:
+                        _refresh_waf_token(page)
 
                     # Also try external solver as backup
                     if captcha_solver:
@@ -319,7 +341,7 @@ def create_account(
                             page.context.add_cookies([{
                                 "name": "aws-waf-token",
                                 "value": waf_cookie,
-                                "domain": ".ankama.com",
+                                "domain": ".auth.ankama.com",
                                 "path": "/",
                             }])
 
@@ -332,8 +354,9 @@ def create_account(
                     page.wait_for_selector("input[name='email']", timeout=15000)
                     _rand_delay(page_wait)
 
-                    # Wait for AwsWafIntegration to re-init on the fresh page
-                    _wait_for_waf_integration(page, timeout_s=15)
+                    # Wait for WAF to re-init (if JS API available)
+                    if has_waf_api:
+                        _wait_for_waf_integration(page, timeout_s=15)
 
                     # Refill the form
                     _human_type(page, "input[name='email']", identity.email, typing_delay)
@@ -373,6 +396,48 @@ def create_account(
                              f"Errors: {error_text or 'none visible'}")
 
         raise RuntimeError(f"Registration failed: {error_text or 'Unknown error'}")
+
+
+def _log_page_diagnostics(page) -> None:
+    """Log page state to understand what WAF scripts/tokens are available."""
+    try:
+        diag = page.evaluate("""() => {
+            const result = {};
+            // Check for AwsWafIntegration variants
+            result.AwsWafIntegration = typeof AwsWafIntegration !== 'undefined';
+            result.AwsWafCaptcha = typeof AwsWafCaptcha !== 'undefined';
+            result.awsWafCookieManager = typeof awsWafCookieManager !== 'undefined';
+            // Check for secure-form
+            const sf = document.querySelector('secure-form');
+            result.secureForm = !!sf;
+            result.secureFormMethods = sf ? Object.getOwnPropertyNames(
+                Object.getPrototypeOf(sf)).filter(m => m !== 'constructor').slice(0, 10) : [];
+            // List all scripts loaded
+            result.scripts = Array.from(document.querySelectorAll('script[src]'))
+                .map(s => s.src).filter(s => s.includes('waf') || s.includes('challenge') || s.includes('captcha'));
+            // Check for WAF-related globals
+            const wafGlobals = [];
+            for (const key of Object.keys(window)) {
+                const lk = key.toLowerCase();
+                if (lk.includes('waf') || lk.includes('captcha') || lk.includes('goku') || lk.includes('challenge')) {
+                    wafGlobals.push(key);
+                }
+            }
+            result.wafGlobals = wafGlobals.slice(0, 20);
+            return result;
+        }""")
+        logger.info("Page diagnostics: %s", json.dumps(diag, indent=2))
+
+        # Also log cookies
+        cookies = page.context.cookies()
+        waf_cookies = [c for c in cookies if 'waf' in c['name'].lower() or 'aws' in c['name'].lower()]
+        logger.info("WAF-related cookies: %s", json.dumps([{"name": c["name"], "domain": c["domain"],
+                     "value": c["value"][:50] + "..." if len(c["value"]) > 50 else c["value"]}
+                     for c in waf_cookies], indent=2))
+        all_cookie_names = [c['name'] for c in cookies]
+        logger.info("All cookie names: %s", all_cookie_names)
+    except Exception as e:
+        logger.warning("Diagnostics failed: %s", e)
 
 
 def _handle_captcha(page, captcha_solver: CaptchaSolver | None) -> None:
