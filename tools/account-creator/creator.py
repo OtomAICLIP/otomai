@@ -67,11 +67,14 @@ def create_account(
         _rand_delay(page_wait)
 
         # Check if we got blocked by WAF (403)
-        if "403 ERROR" in page.content() or "Request could not be satisfied" in page.content():
+        page_html = page.content()
+        if "403 ERROR" in page_html or "Request could not be satisfied" in page_html:
             # Try injecting WAF token via CAPTCHA solver
             if captcha_solver:
                 logger.info("Got WAF block, attempting CAPTCHA solve...")
-                waf_cookie = captcha_solver.solve_aws_waf(REGISTER_URL, CHALLENGE_JS_URL)
+                waf_cookie = captcha_solver.solve_aws_waf(
+                    REGISTER_URL, page_html=page_html, challenge_js_url=CHALLENGE_JS_URL,
+                )
                 if waf_cookie:
                     # Set the WAF cookie and retry
                     page.context.add_cookies([{
@@ -197,7 +200,7 @@ def _handle_captcha(page, captcha_solver: CaptchaSolver | None) -> None:
     waf_captcha = page.query_selector("#captcha-container, .awswaf-captcha")
     if waf_captcha and captcha_solver:
         logger.info("AWS WAF CAPTCHA detected, solving...")
-        waf_cookie = captcha_solver.solve_aws_waf(page.url, CHALLENGE_JS_URL)
+        waf_cookie = captcha_solver.solve_aws_waf(page.url, page_html=page.content(), challenge_js_url=CHALLENGE_JS_URL)
         if waf_cookie:
             page.context.add_cookies([{
                 "name": "aws-waf-token",

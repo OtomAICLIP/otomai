@@ -1,8 +1,10 @@
-"""CAPTCHA solver with multiple backends: free harvester, nopecha, or paid services."""
+"""CAPTCHA solver with multiple backends: free auto-solver, harvester, nopecha, or paid services."""
 
+import base64
 import http.server
 import json
 import logging
+import re
 import threading
 import time
 import webbrowser
@@ -14,44 +16,193 @@ logger = logging.getLogger(__name__)
 CAPSOLVER_API = "https://api.capsolver.com"
 TWOCAPTCHA_API = "https://api.2captcha.com"
 NOPECHA_API = "https://api.nopecha.com"
+WAF_HELPER_API = "https://aws-waf-helper.vercel.app"
 
 
 class CaptchaSolver:
-    """Multi-backend CAPTCHA solver. Supports: harvester (free), nopecha, capsolver, 2captcha."""
+    """Multi-backend CAPTCHA solver.
 
-    def __init__(self, backend: str = "harvester", api_key: str = ""):
+    Backends:
+      - waf-solver: Free automated AWS WAF solver (uses aws-waf-helper.vercel.app AI endpoint)
+      - harvester: Free manual solving via local browser page
+      - nopecha: Free tier (100 solves/month) cloud API
+      - capsolver: Paid cloud API
+      - 2captcha: Paid cloud API
+    """
+
+    def __init__(self, backend: str = "waf-solver", api_key: str = ""):
         self.backend = backend
         self.api_key = api_key
 
-        if backend != "harvester" and not api_key:
+        if backend not in ("harvester", "waf-solver") and not api_key:
             raise ValueError(f"API key required for backend '{backend}'")
 
-    def solve_aws_waf(self, website_url: str, challenge_js_url: str | None = None) -> str:
-        """Solve AWS WAF CAPTCHA. Returns the aws-waf-token cookie value."""
-        if self.backend == "harvester":
-            return self._harvest_waf_token(website_url)
-        elif self.backend == "capsolver":
-            return self._capsolver_aws_waf(website_url, challenge_js_url)
-        elif self.backend == "2captcha":
-            return self._twocaptcha_aws_waf(website_url)
-        elif self.backend == "nopecha":
-            logger.warning("Nopecha does not support AWS WAF directly, falling back to harvester")
-            return self._harvest_waf_token(website_url)
-        else:
+    def solve_aws_waf(self, website_url: str, page_html: str = "", challenge_js_url: str | None = None) -> str:
+        """Solve AWS WAF CAPTCHA. Returns the aws-waf-token cookie value.
+
+        Args:
+            website_url: The URL being protected by WAF.
+            page_html: Raw HTML of the WAF challenge page (needed for waf-solver backend).
+            challenge_js_url: URL to challenge.js (optional, for capsolver).
+        """
+        dispatch = {
+            "waf-solver": lambda: self._waf_solver_solve(website_url, page_html),
+            "harvester": lambda: self._harvest_waf_token(website_url),
+            "capsolver": lambda: self._capsolver_aws_waf(website_url, challenge_js_url),
+            "2captcha": lambda: self._twocaptcha_aws_waf(website_url),
+            "nopecha": lambda: self._harvest_waf_token(website_url),  # nopecha doesn't support WAF
+        }
+        handler = dispatch.get(self.backend)
+        if not handler:
             raise ValueError(f"Unknown backend: {self.backend}")
+        return handler()
 
     def solve_funcaptcha(self, website_url: str, public_key: str, surl: str | None = None) -> str:
         """Solve Arkose Labs FunCAPTCHA. Returns the token."""
-        if self.backend == "harvester":
-            return self._harvest_funcaptcha(website_url, public_key)
-        elif self.backend == "capsolver":
-            return self._capsolver_funcaptcha(website_url, public_key, surl)
-        elif self.backend == "2captcha":
-            return self._twocaptcha_funcaptcha(website_url, public_key, surl)
-        elif self.backend == "nopecha":
-            return self._nopecha_funcaptcha(website_url, public_key)
-        else:
+        dispatch = {
+            "waf-solver": lambda: self._harvest_funcaptcha(website_url, public_key),  # WAF solver is AWS-only
+            "harvester": lambda: self._harvest_funcaptcha(website_url, public_key),
+            "capsolver": lambda: self._capsolver_funcaptcha(website_url, public_key, surl),
+            "2captcha": lambda: self._twocaptcha_funcaptcha(website_url, public_key, surl),
+            "nopecha": lambda: self._nopecha_funcaptcha(website_url, public_key),
+        }
+        handler = dispatch.get(self.backend)
+        if not handler:
             raise ValueError(f"Unknown backend: {self.backend}")
+        return handler()
+
+    # --- Free AWS WAF Auto-Solver Backend (uses aws-waf-helper.vercel.app) ---
+
+    def _waf_solver_solve(self, website_url: str, page_html: str, max_retries: int = 3) -> str:
+        """Solve AWS WAF CAPTCHA using the free aws-waf-helper AI endpoint.
+
+        Protocol:
+        1. Parse gokuProps from the challenge page HTML
+        2. Fetch the CAPTCHA problem (visual or audio) from the WAF challenge endpoint
+        3. Send the problem assets to the free AI solver API
+        4. Submit the solution back to the WAF verify endpoint
+        5. Exchange the voucher for an aws-waf-token
+        """
+        from urllib.parse import urlparse
+
+        domain = urlparse(website_url).hostname or ""
+        if domain.startswith("www."):
+            domain = domain[4:]
+
+        # Step 1: Extract gokuProps and challenge base URL from HTML
+        goku_props, base_url = self._waf_parse_goku_props(page_html)
+        if not goku_props or not base_url:
+            logger.warning("Could not extract gokuProps from page HTML, falling back to harvester")
+            return self._harvest_waf_token(website_url)
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                token = self._waf_solver_attempt(goku_props, base_url, domain)
+                if token:
+                    logger.info("AWS WAF solved on attempt %d", attempt)
+                    return token
+            except Exception as e:
+                logger.warning("WAF solve attempt %d failed: %s", attempt, e)
+
+        logger.warning("All WAF solver attempts failed, falling back to harvester")
+        return self._harvest_waf_token(website_url)
+
+    def _waf_parse_goku_props(self, html: str) -> tuple[dict | None, str | None]:
+        """Extract window.gokuProps and challenge base URL from WAF page HTML."""
+        # Extract gokuProps JSON
+        match = re.search(r'window\.gokuProps\s*=\s*({.*?});', html, re.DOTALL)
+        if not match:
+            return None, None
+        try:
+            goku_props = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None, None
+
+        # Extract challenge base URL from script src
+        script_match = re.search(r'<script\s+src="(https://[^"]*?/challenge\.js)"', html)
+        if script_match:
+            challenge_url = script_match.group(1)
+            # Base URL is everything before /challenge.js, with /captcha appended
+            base_url = challenge_url.rsplit("/", 1)[0] + "/captcha"
+        else:
+            base_url = None
+
+        return goku_props, base_url
+
+    def _waf_solver_attempt(self, goku_props: dict, base_url: str, domain: str, solution_type: str = "visual") -> str | None:
+        """Single attempt to solve the WAF CAPTCHA."""
+        key = goku_props.get("key", "")
+
+        # Fetch the problem
+        problem_url = f"{base_url}/problem?kind={solution_type}&key={key}&domain={domain}&locale=en-us"
+        resp = requests.get(problem_url, timeout=30)
+        resp.raise_for_status()
+        problem = resp.json()
+
+        if solution_type == "visual":
+            solution = self._waf_solve_visual(problem)
+        else:
+            solution = self._waf_solve_audio(problem)
+
+        if not solution:
+            return None
+
+        # Verify the solution
+        verify_url = f"{base_url}/verify"
+        verify_resp = requests.post(
+            verify_url,
+            json={"key": key, "answer": solution, "domain": domain},
+            timeout=30,
+        )
+        verify_resp.raise_for_status()
+        verify_data = verify_resp.json()
+
+        voucher = verify_data.get("captcha_voucher")
+        if not voucher:
+            logger.debug("Verification failed: %s", verify_data)
+            return None
+
+        # Exchange voucher for token
+        token_base = base_url.replace("/captcha", "/token")
+        token_resp = requests.post(
+            f"{token_base}/voucher",
+            json={"key": key, "voucher": voucher, "domain": domain},
+            timeout=30,
+        )
+        token_resp.raise_for_status()
+        token_data = token_resp.json()
+        return token_data.get("token", "")
+
+    def _waf_solve_visual(self, problem: dict) -> str | None:
+        """Send visual CAPTCHA images to the free AI solver."""
+        images = problem.get("images", [])
+        target = problem.get("target", "")
+        if not images or not target:
+            return None
+
+        resp = requests.post(
+            f"{WAF_HELPER_API}/getVisualSolution",
+            json={"images": images, "target": target},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("result")
+
+    def _waf_solve_audio(self, problem: dict) -> str | None:
+        """Send audio CAPTCHA to the free AI solver."""
+        audio_data = problem.get("audioData", "")
+        if not audio_data:
+            return None
+
+        resp = requests.post(
+            f"{WAF_HELPER_API}/getAudioSolution",
+            json={"audioData": audio_data},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("result")
 
     # --- Free Harvester Backend ---
 

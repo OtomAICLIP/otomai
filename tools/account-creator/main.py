@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ankama-creator")
 
-CAPTCHA_BACKENDS = ["harvester", "capsolver", "2captcha", "nopecha"]
+CAPTCHA_BACKENDS = ["waf-solver", "harvester", "capsolver", "2captcha", "nopecha"]
 PROXY_MODES = ["direct", "file", "free"]
 
 
@@ -55,20 +55,24 @@ def save_account(account: dict, output_file: str) -> None:
 
 
 def build_captcha_solver(config: dict, args: argparse.Namespace) -> CaptchaSolver | None:
-    backend = args.captcha_backend or config.get("captcha_backend", "harvester")
+    backend = args.captcha_backend or config.get("captcha_backend", "waf-solver")
     api_key = args.captcha_key or config.get("captcha_api_key", "")
 
     if backend not in CAPTCHA_BACKENDS:
         logger.error("Unknown CAPTCHA backend: %s (available: %s)", backend, ", ".join(CAPTCHA_BACKENDS))
         return None
 
+    if backend == "waf-solver":
+        logger.info("Using free AWS WAF auto-solver (aws-waf-helper.vercel.app)")
+        return CaptchaSolver(backend="waf-solver")
+
     if backend == "harvester":
         logger.info("Using free CAPTCHA harvester (manual solving in browser)")
         return CaptchaSolver(backend="harvester")
 
     if not api_key:
-        logger.warning("No API key for %s backend, falling back to harvester", backend)
-        return CaptchaSolver(backend="harvester")
+        logger.warning("No API key for %s backend, falling back to waf-solver", backend)
+        return CaptchaSolver(backend="waf-solver")
 
     logger.info("Using %s CAPTCHA backend", backend)
     return CaptchaSolver(backend=backend, api_key=api_key)
