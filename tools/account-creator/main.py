@@ -4,6 +4,10 @@
 Usage:
     python main.py --count 1 --config config.json
     python main.py --count 5 --headful  # visible browser for debugging
+    python main.py --count 1 --captcha-backend harvester  # free: manual CAPTCHA solving
+    python main.py --count 1 --captcha-backend nopecha --captcha-key YOUR_KEY  # nopecha free tier
+    python main.py --count 1 --proxy-mode free  # scrape free proxy lists
+    python main.py --count 1 --proxy-mode direct  # use local IP (must be residential)
 """
 
 import argparse
@@ -26,6 +30,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ankama-creator")
 
+CAPTCHA_BACKENDS = ["harvester", "capsolver", "2captcha", "nopecha"]
+PROXY_MODES = ["direct", "file", "free"]
+
 
 def load_config(path: str) -> dict:
     config_file = Path(path)
@@ -47,31 +54,77 @@ def save_account(account: dict, output_file: str) -> None:
     logger.info("Account saved to %s (total: %d)", output_file, len(accounts))
 
 
+def build_captcha_solver(config: dict, args: argparse.Namespace) -> CaptchaSolver | None:
+    backend = args.captcha_backend or config.get("captcha_backend", "harvester")
+    api_key = args.captcha_key or config.get("captcha_api_key", "")
+
+    if backend not in CAPTCHA_BACKENDS:
+        logger.error("Unknown CAPTCHA backend: %s (available: %s)", backend, ", ".join(CAPTCHA_BACKENDS))
+        return None
+
+    if backend == "harvester":
+        logger.info("Using free CAPTCHA harvester (manual solving in browser)")
+        return CaptchaSolver(backend="harvester")
+
+    if not api_key:
+        logger.warning("No API key for %s backend, falling back to harvester", backend)
+        return CaptchaSolver(backend="harvester")
+
+    logger.info("Using %s CAPTCHA backend", backend)
+    return CaptchaSolver(backend=backend, api_key=api_key)
+
+
+def build_proxy_manager(config: dict, args: argparse.Namespace) -> ProxyManager | None:
+    mode = args.proxy_mode or config.get("proxy_mode", "direct")
+    proxy_cfg = config.get("proxy", {})
+    max_per_ip = proxy_cfg.get("rotate_after", 4)
+
+    if mode == "direct":
+        logger.info("Using direct connection (no proxy). Your IP must be residential.")
+        return None
+
+    if mode == "free":
+        logger.info("Scraping free proxy lists...")
+        mgr = ProxyManager.from_free_lists(max_per_ip=max_per_ip)
+        if mgr.available_count == 0:
+            logger.warning("No working free proxies found, falling back to direct connection")
+            return None
+        logger.info("Free proxy pool: %d proxies available", mgr.available_count)
+        return mgr
+
+    if mode == "file":
+        if not proxy_cfg.get("list_file"):
+            logger.warning("No proxy list file configured, running direct")
+            return None
+        mgr = ProxyManager.from_file(
+            proxy_cfg["list_file"],
+            proxy_cfg.get("format", "host:port:user:pass"),
+            max_per_ip,
+        )
+        if mgr.available_count == 0:
+            logger.warning("No proxies in file, running direct")
+            return None
+        logger.info("File proxy pool: %d proxies available", mgr.available_count)
+        return mgr
+
+    logger.error("Unknown proxy mode: %s (available: %s)", mode, ", ".join(PROXY_MODES))
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Ankama account creator")
     parser.add_argument("--count", type=int, default=1, help="Number of accounts to create")
     parser.add_argument("--config", default="config.json", help="Config file path")
     parser.add_argument("--headful", action="store_true", help="Run browser in visible mode")
+    parser.add_argument("--captcha-backend", choices=CAPTCHA_BACKENDS, help="CAPTCHA solver backend")
+    parser.add_argument("--captcha-key", help="API key for CAPTCHA solver")
+    parser.add_argument("--proxy-mode", choices=PROXY_MODES, help="Proxy mode: direct, file, or free")
     args = parser.parse_args()
 
     config = load_config(args.config)
 
-    # Init CAPTCHA solver
-    capsolver_key = config.get("capsolver_api_key", "")
-    captcha_solver = CaptchaSolver(capsolver_key) if capsolver_key else None
-    if not captcha_solver:
-        logger.warning("No CAPTCHA solver API key configured. CAPTCHA challenges will block account creation.")
-
-    # Init proxy manager
-    proxy_cfg = config.get("proxy", {})
-    proxy_mgr = None
-    if proxy_cfg.get("enabled"):
-        proxy_mgr = ProxyManager.from_file(
-            proxy_cfg.get("list_file", "proxies.txt"),
-            proxy_cfg.get("format", "host:port:user:pass"),
-            proxy_cfg.get("rotate_after", 4),
-        )
-        logger.info("Proxy manager: %d proxies available", proxy_mgr.available_count)
+    captcha_solver = build_captcha_solver(config, args)
+    proxy_mgr = build_proxy_manager(config, args)
 
     account_cfg = config.get("account", {})
     behavior_cfg = config.get("behavior", {})

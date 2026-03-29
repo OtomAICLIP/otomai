@@ -1,8 +1,8 @@
 {
-  "capsolver_api_key": "",
+  "captcha_backend": "harvester",
+  "captcha_api_key": "",
+  "proxy_mode": "direct",
   "proxy": {
-    "enabled": false,
-    "type": "residential",
     "list_file": "proxies.txt",
     "format": "host:port:user:pass",
     "rotate_after": 4

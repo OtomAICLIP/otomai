@@ -1,11 +1,20 @@
-"""Proxy rotation manager for residential proxy pool."""
+"""Proxy rotation manager with support for file-based lists, free proxy scraping, and direct mode."""
 
 import itertools
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import requests
+
 logger = logging.getLogger(__name__)
+
+FREE_PROXY_SOURCES = [
+    "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
+    "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+]
 
 
 @dataclass
@@ -14,17 +23,18 @@ class Proxy:
     port: int
     username: str = ""
     password: str = ""
+    protocol: str = "http"
     accounts_created: int = 0
 
     @property
     def url(self) -> str:
         if self.username:
-            return f"http://{self.username}:{self.password}@{self.host}:{self.port}"
-        return f"http://{self.host}:{self.port}"
+            return f"{self.protocol}://{self.username}:{self.password}@{self.host}:{self.port}"
+        return f"{self.protocol}://{self.host}:{self.port}"
 
     @property
     def playwright_config(self) -> dict:
-        config = {"server": f"http://{self.host}:{self.port}"}
+        config = {"server": f"{self.protocol}://{self.host}:{self.port}"}
         if self.username:
             config["username"] = self.username
             config["password"] = self.password
@@ -57,6 +67,45 @@ class ProxyManager:
 
         logger.info("Loaded %d proxies from %s", len(proxies), path)
         return cls(proxies=proxies, max_per_ip=max_per_ip)
+
+    @classmethod
+    def from_free_lists(cls, max_per_ip: int = 4, test_timeout: int = 5, max_proxies: int = 20) -> "ProxyManager":
+        """Scrape free proxy lists and test connectivity. Best-effort — free proxies are unreliable."""
+        proxies = []
+        seen = set()
+
+        for source_url in FREE_PROXY_SOURCES:
+            try:
+                resp = requests.get(source_url, timeout=10)
+                resp.raise_for_status()
+                for line in resp.text.strip().splitlines():
+                    line = line.strip()
+                    match = re.match(r"^(\d+\.\d+\.\d+\.\d+):(\d+)$", line)
+                    if match and line not in seen:
+                        seen.add(line)
+                        proxies.append(Proxy(host=match.group(1), port=int(match.group(2)), protocol="socks5"))
+            except Exception as e:
+                logger.debug("Failed to fetch %s: %s", source_url, e)
+
+        logger.info("Scraped %d raw proxies from free lists, testing connectivity...", len(proxies))
+
+        # Quick connectivity test
+        working = []
+        for proxy in proxies[:100]:  # Test at most 100
+            try:
+                requests.get(
+                    "https://httpbin.org/ip",
+                    proxies={"https": proxy.url},
+                    timeout=test_timeout,
+                )
+                working.append(proxy)
+                if len(working) >= max_proxies:
+                    break
+            except Exception:
+                continue
+
+        logger.info("Found %d working free proxies", len(working))
+        return cls(proxies=working, max_per_ip=max_per_ip)
 
     def next(self) -> Proxy | None:
         if not self.proxies:
