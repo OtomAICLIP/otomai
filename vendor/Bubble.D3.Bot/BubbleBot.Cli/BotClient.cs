@@ -347,7 +347,7 @@ public class BotClient : TcpClient
                 Identification = new Com.ankama.dofus.server.connection.protocol.IdentificationRequest
                 {
                     DeviceIdentifier = _hwid,
-                    ClientVersion = "3.0.47.42",
+                    ClientVersion = "3.5.8.9",
                     TokenRequest = new TokenRequest
                     {
                         Token = _apiKey,

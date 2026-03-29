@@ -119,19 +119,30 @@ public static class DatacenterService
         
         var secondaryDofusPath = Path.Combine(DofusPath, "..", "aa");
 
-        var filePathLinks = Path.Combine(secondaryDofusPath, "catalog.json");
-        var fileContent = File.ReadAllText(filePathLinks);
-        var catalog = JsonSerializer.Deserialize<CatalogModel>(fileContent) ?? throw new InvalidOperationException("Failed to deserialize catalog.");
-        
-        var worldGraphPath = catalog.InternalIds.FirstOrDefault(x => x.Contains("worldassets") && !x.Contains("PathFinding"));
-        if (worldGraphPath == null)
-            throw new InvalidOperationException("Failed to find world-graph path.");
-        
-        // it look like       "{UnityEngine.AddressableAssets.Addressables.RuntimePath}\\StandaloneWindows64\\worldassets_assets_all_00fb41f1b07b553765149b0a906eb3e2.bundle",
+        // Try catalog.json first (older Dofus versions), fall back to direct file scan
+        var bundlesDir = Path.Combine(secondaryDofusPath, "StandaloneWindows64");
+        string worldGraphBundlePath;
 
-        // we just need the worldassets_assets_all_00fb41f1b07b553765149b0a906eb3e2.bundle part
-        var worldGraphBundle = worldGraphPath.Split('\\').Last().Split('.').First();
-        var worldGraphBundlePath = Path.Combine(secondaryDofusPath, "StandaloneWindows64", worldGraphBundle + ".bundle");
+        var filePathLinks = Path.Combine(secondaryDofusPath, "catalog.json");
+        if (File.Exists(filePathLinks))
+        {
+            var fileContent = File.ReadAllText(filePathLinks);
+            var catalog = JsonSerializer.Deserialize<CatalogModel>(fileContent) ?? throw new InvalidOperationException("Failed to deserialize catalog.");
+
+            var worldGraphPath = catalog.InternalIds.FirstOrDefault(x => x.Contains("worldassets") && !x.Contains("PathFinding"));
+            if (worldGraphPath == null)
+                throw new InvalidOperationException("Failed to find world-graph path in catalog.");
+
+            var worldGraphBundle = worldGraphPath.Split('\\').Last().Split('.').First();
+            worldGraphBundlePath = Path.Combine(bundlesDir, worldGraphBundle + ".bundle");
+        }
+        else
+        {
+            // Newer Dofus versions use catalog.bin (binary) — scan for worldassets bundle directly
+            Log.Information("catalog.json not found, scanning for worldassets bundle directly.");
+            var worldGraphFile = Directory.GetFiles(bundlesDir, "worldassets_assets_all*.bundle").FirstOrDefault();
+            worldGraphBundlePath = worldGraphFile ?? throw new InvalidOperationException("Failed to find worldassets bundle in " + bundlesDir);
+        }
         
         var bundle = AssetBundleReader.ReadAssetBundle(worldGraphBundlePath);
         var assetManager = UnityLib.GetAssetsManager();

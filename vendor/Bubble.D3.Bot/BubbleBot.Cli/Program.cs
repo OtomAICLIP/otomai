@@ -294,7 +294,7 @@ _ = Task.Run(async () =>
     }
 });
 
-ClearVisibleRegion();
+try { ClearVisibleRegion(); } catch (IOException) { /* no console in SSH sessions */ }
 
 var table = new Table()
             .Border(TableBorder.MinimalHeavyHead)
@@ -311,8 +311,11 @@ var table = new Table()
             .RoundedBorder()
     ;
 
-var lastConsoleSize = Console.WindowWidth + Console.WindowHeight;
+var lastConsoleSize = 0;
+try { lastConsoleSize = Console.WindowWidth + Console.WindowHeight; } catch { }
 
+try
+{
 await AnsiConsole.Live(table)
                  .AutoClear(false)                    // Do not remove when done
                  .Overflow(VerticalOverflow.Ellipsis) // Show ellipsis when overflowing
@@ -324,15 +327,18 @@ await AnsiConsole.Live(table)
                      {
                          if (test % 600 == 0) // It runs every 200ms so this happens every 200ms * 600 = 2 minutes
                          {
-                             ClearVisibleRegion();
+                             try { ClearVisibleRegion(); } catch { }
                              test = 0;
                          }
 
+                         try
+                         {
                          if (lastConsoleSize != Console.WindowWidth + Console.WindowHeight)
                          {
                              lastConsoleSize = Console.WindowWidth + Console.WindowHeight;
-                             ClearVisibleRegion();
+                             try { ClearVisibleRegion(); } catch { }
                          }
+                         } catch { }
 
                          table.Title($"BubbleBot - Stats - {BotManager.Instance.GetClients().Count} clients");
 
@@ -640,6 +646,12 @@ await AnsiConsole.Live(table)
                          await Task.Delay(200);
                      }
                  });
+}
+catch (IOException)
+{
+    // No interactive console (SSH session) — skip dashboard, just wait
+    Log.Logger.Information("No interactive console detected, running in headless mode.");
+}
 
 await Task.Delay(-1);
 
