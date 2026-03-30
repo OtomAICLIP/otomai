@@ -115,9 +115,9 @@ public class BotManager : Singleton<BotManager>
             }
         }
 
-        var (key, _, _, webProxy) =
+        var (key, certId, certHash, webProxy) =
             await AnkamaService.Instance.ConnectAsync(account.Username, proxyIp, proxyPort, proxyUsername, proxyPassword);
-        
+
         if (settings == null)
         {
             settings = new BotSettings
@@ -128,21 +128,25 @@ public class BotManager : Singleton<BotManager>
                 Address = ankamaHost,
                 Port = ankamaPort,
                 ServerId = account.Server,
-                Proxy = string.IsNullOrEmpty(account.Proxy) ? null 
-                    : new Socks5Options(proxyIp, 
+                Proxy = string.IsNullOrEmpty(account.Proxy) ? null
+                    : new Socks5Options(proxyIp,
                                         proxyPort,
                                         ankamaHost,
                                         ankamaPort,
-                                        proxyUsername, 
+                                        proxyUsername,
                                         proxyPassword),
                 IsBank = account.IsBank,
                 IsKoli = account.IsKoli,
                 WebProxy = webProxy,
+                CertificateId = certId,
+                CertificateHash = certHash,
             };
         }
         else
         {
             settings.ApiKey = key;
+            settings.CertificateId = certId;
+            settings.CertificateHash = certHash;
         }
 
         var botClient = new BotClient(settings);

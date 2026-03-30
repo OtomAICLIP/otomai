@@ -31,6 +31,8 @@ public class BotSettings
     public bool IsBank { get; set; }
     public WebProxy? WebProxy { get; set; }
     public bool IsKoli { get; set; }
+    public string CertificateId { get; set; } = string.Empty;
+    public string CertificateHash { get; set; } = string.Empty;
 }
 
 public class BotClient : TcpClient
@@ -349,6 +351,9 @@ public class BotClient : TcpClient
 
     private void SendLogin()
     {
+        var certId = string.IsNullOrEmpty(_settings.CertificateId) ? 0 : long.Parse(_settings.CertificateId);
+        var certHash = _settings.CertificateHash ?? string.Empty;
+
         SendMessage(new LoginMessage()
         {
             Request = new Com.ankama.dofus.server.connection.protocol.Request
@@ -363,8 +368,8 @@ public class BotClient : TcpClient
                         Token = _apiKey,
                         ShieldValue = new TokenRequest.Shield
                         {
-                            CertificateId = 0,
-                            CertificateHash = null
+                            CertificateId = certId,
+                            CertificateHash = certHash
                         },
                     }
                 }
