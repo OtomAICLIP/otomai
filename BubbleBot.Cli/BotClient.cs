@@ -188,7 +188,13 @@ public class BotClient : TcpClient
 
         _token = selectServer.SuccessValue.Token;
         _gameIp = selectServer.SuccessValue.Host;
-        _gamePort = selectServer.SuccessValue.Ports.Count > 0 ? selectServer.SuccessValue.Ports[0] : 443;
+
+        // Prefer port 443 (TLS) when available; fall back to first port (5555, plain TCP).
+        // Port 5555 is the standard game port without TLS; port 443 is the TLS game port.
+        var ports = selectServer.SuccessValue.Ports;
+        var tlsPort = ports.Contains(443) ? 443 : 0;
+        _gamePort = tlsPort > 0 ? tlsPort : (ports.Count > 0 ? ports[0] : 5555);
+        var useTls = _gamePort == 443;
 
 
         if (Proxy != null)
@@ -218,11 +224,11 @@ public class BotClient : TcpClient
                                        Proxy,
                                        _settings);
 
-        // TLS is required by the game server (port 443).
-        // TlsTargetHost must be set to the original hostname (not the resolved IP) so that
-        // TLS SNI works correctly — the server certificate is issued for the hostname.
-        GameClient.UseTls = true;
-        GameClient.TlsTargetHost = _gameIp;
+        // TLS is required on port 443; port 5555 uses plain TCP.
+        // TlsTargetHost must be the original hostname (not resolved IP) for correct SNI.
+        GameClient.UseTls = useTls;
+        if (useTls)
+            GameClient.TlsTargetHost = _gameIp;
 
         BotManager.Instance.AddGameBotClient(GameClient);
 
