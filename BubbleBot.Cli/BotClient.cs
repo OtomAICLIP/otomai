@@ -189,12 +189,13 @@ public class BotClient : TcpClient
         _token = selectServer.SuccessValue.Token;
         _gameIp = selectServer.SuccessValue.Host;
 
-        // Prefer port 443 (TLS) when available; fall back to first port (5555, plain TCP).
-        // Port 5555 is the standard game port without TLS; port 443 is the TLS game port.
+        // The Dofus game server exposes [5555, 443]. Port 5555 is plain-TCP protobuf.
+        // Port 443 accepts TCP but does NOT speak standard TLS — it is also plain-TCP protobuf
+        // (same protocol as the auth server which also uses 443 without TLS).
+        // Prefer 5555; fall back to first available port; never enable TLS.
         var ports = selectServer.SuccessValue.Ports;
-        var tlsPort = ports.Contains(443) ? 443 : 0;
-        _gamePort = tlsPort > 0 ? tlsPort : (ports.Count > 0 ? ports[0] : 5555);
-        var useTls = _gamePort == 443;
+        _gamePort = ports.Contains(5555) ? 5555 : (ports.Count > 0 ? ports[0] : 5555);
+        const bool useTls = false;
 
 
         if (Proxy != null)
@@ -224,11 +225,8 @@ public class BotClient : TcpClient
                                        Proxy,
                                        _settings);
 
-        // TLS is required on port 443; port 5555 uses plain TCP.
-        // TlsTargetHost must be the original hostname (not resolved IP) for correct SNI.
+        // Game server uses plain-TCP protobuf on both port 5555 and port 443. No TLS.
         GameClient.UseTls = useTls;
-        if (useTls)
-            GameClient.TlsTargetHost = _gameIp;
 
         BotManager.Instance.AddGameBotClient(GameClient);
 
