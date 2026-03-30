@@ -218,7 +218,9 @@ public class BotClient : TcpClient
                                        Proxy,
                                        _settings);
 
-        // Enable TLS for game server connections — Dofus 3.5+ requires TLS
+        // TLS is required by the game server (port 443).
+        // TlsTargetHost must be set to the original hostname (not the resolved IP) so that
+        // TLS SNI works correctly — the server certificate is issued for the hostname.
         GameClient.UseTls = true;
         GameClient.TlsTargetHost = _gameIp;
 
